@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react"
 import { disableCustomFactor, getCustomFactorAvailability, listCustomFactors, saveCustomFactor, validateCustomFactor, type CompiledFactor, type CustomFactor, type CustomFactorAvailability, type CustomFactorCommand, type CustomFactorPage } from "@/lib/stock-custom-factor-api"
+import { clearPendingWrite, readPendingWrites, recordPendingWrite, type PendingWriteEntry } from "@/lib/stock-pending-writes"
 
 type Identity = { token: string; scope: string }
 type Draft = { name: string; expression: string; description: string; direction: "high" | "low" }
@@ -12,6 +13,53 @@ type EditorState = {
 }
 type PendingWrite = { identity: Identity; kind: "save"; body: CustomFactorCommand; editing?: { id: string; expected_revision: number } }
   | { identity: Identity; kind: "disable"; id: string; body: { idempotency_key: string; expected_revision: number } }
+
+/** 把一次自定义因子写登记成跨页未确认写：只留参数与原幂等键，token 一律不落盘。 */
+function factorPendingEntry(command: PendingWrite): PendingWriteEntry {
+  if (command.kind === "save") {
+    return {
+      kind: "custom-factor-save",
+      idempotency_key: command.body.idempotency_key,
+      ...(command.editing ? { expected_revision: command.editing.expected_revision } : {}),
+      signature: JSON.stringify({
+        name: command.body.name, expression: command.body.expression, description: command.body.description, direction: command.body.direction,
+        ...(command.editing ? { editing: command.editing } : {}),
+      }),
+      created_at: new Date().toISOString(),
+    }
+  }
+  return {
+    kind: "custom-factor-disable",
+    idempotency_key: command.body.idempotency_key,
+    expected_revision: command.body.expected_revision,
+    signature: JSON.stringify({ id: command.id }),
+    created_at: new Date().toISOString(),
+  }
+}
+
+/** 由注册表条目重建同一条写命令，使「重试原请求」仍带原幂等键、原参数和原期望版本。 */
+function factorPendingWrite(scope: string, identity: Identity): PendingWrite | null {
+  const entry = readPendingWrites(scope).find((item) => item.kind === "custom-factor-save" || item.kind === "custom-factor-disable")
+  if (!entry) return null
+  let parameters: Record<string, unknown>
+  try {
+    parameters = JSON.parse(entry.signature)
+  } catch {
+    return null
+  }
+  if (!parameters || typeof parameters !== "object" || Array.isArray(parameters)) return null
+  if (entry.kind === "custom-factor-save") {
+    const { name, expression, description, direction, editing } = parameters
+    if (typeof name !== "string" || typeof expression !== "string" || typeof description !== "string" || (direction !== "high" && direction !== "low")) return null
+    return {
+      identity, kind: "save",
+      body: { name, expression, description, direction, idempotency_key: entry.idempotency_key },
+      ...(editing && typeof editing === "object" ? { editing: editing as { id: string; expected_revision: number } } : {}),
+    }
+  }
+  if (typeof parameters.id !== "string" || entry.expected_revision === undefined) return null
+  return { identity, kind: "disable", id: parameters.id, body: { idempotency_key: entry.idempotency_key, expected_revision: entry.expected_revision } }
+}
 
 const LIMIT = 20
 const controlClass = "rounded border border-[var(--border)] bg-[var(--bg-secondary)] px-2 py-1.5 text-xs disabled:opacity-50"
@@ -63,7 +111,7 @@ export function StockFactorEditor({ token, scope }: { token: string; scope: stri
 
   useEffect(() => {
     const origin = identity.current
-    pending.current = null
+    pending.current = factorPendingWrite(origin.scope, origin)
     setState(empty(origin))
     load()
     return () => { active.current?.abort(); active.current = null }
@@ -72,17 +120,22 @@ export function StockFactorEditor({ token, scope }: { token: string; scope: stri
   async function commit(command: PendingWrite, signal: AbortSignal) {
     const origin = command.identity
     if (identity.current !== origin || signal.aborted) return
+    recordPendingWrite(origin.scope, factorPendingEntry(command))
     let saved: CustomFactor
     try {
       saved = command.kind === "save" ? await saveCustomFactor(command.body, origin.token, signal, command.editing)
         : await disableCustomFactor(command.id, command.body, origin.token, signal)
     } catch (error) {
       const status = (error as { status?: number })?.status
-      if (identity.current === origin && status && [400, 401, 403, 404, 409, 422].includes(status)) pending.current = null
+      if (identity.current === origin && status && [400, 401, 403, 404, 409, 422].includes(status)) {
+        pending.current = null
+        clearPendingWrite(origin.scope, command.body.idempotency_key)
+      }
       throw error
     }
     if (identity.current !== origin || signal.aborted) return
     pending.current = null
+    clearPendingWrite(origin.scope, command.body.idempotency_key)
     patch(origin, { editing: saved, draft: { name: saved.name, expression: saved.expression, description: saved.description, direction: saved.direction }, validation: null, validatedFor: "", confirmDisable: false, history: null,
       notice: command.kind === "save" ? `定义已保存：${saved.name} v${saved.revision}；未启动IC、回测或模型。` : "已停用；历史定义和已保存研究引用不会删除。" })
     try {
@@ -164,7 +217,7 @@ export function StockFactorEditor({ token, scope }: { token: string; scope: stri
         {state.editing && !state.editing.disabled && <button type="button" className={buttonClass} disabled={locked} onClick={() => patch(identity.current, { confirmDisable: true })}>停用当前因子</button>}
         {unresolved && <button type="button" className={buttonClass} disabled={state.busy} onClick={() => { const command = pending.current; if (command) perform((signal) => commit(command, signal)) }}>重试原请求</button>}
       </div>
-      {unresolved && !state.busy && <p role="alert">上次写入结果未确认；保留原参数及幂等键，仅可重试原请求，避免重复新建。切换会话会清理本地草稿，重新登录后请先查定义列表。</p>}
+      {unresolved && !state.busy && <p role="alert">上次写入结果未确认；原参数与原幂等键已保存在本浏览器，离开页面、切换页面或刷新都不会丢失，也不会自动重发。只有点击「重试原请求」才会用同一个幂等键重试，服务端据此去重，不会重复新建或改写历史版本；重试前请先核对定义列表。</p>}
       {state.confirmDisable && state.editing && <div role="alert" className="space-x-2"><span>停用后禁止新选用，不能编辑；历史版本不删除。是否确认？</span>
         <button type="button" className={buttonClass} disabled={locked} onClick={() => { const record = state.editing; if (record) perform(async (signal, origin) => { const command: PendingWrite = { identity: origin, kind: "disable", id: record.id, body: { expected_revision: record.latest_revision, idempotency_key: crypto.randomUUID() } }; pending.current = command; await commit(command, signal) }) }}>确认停用</button>
         <button type="button" className={buttonClass} disabled={state.busy || unresolved} onClick={() => patch(identity.current, { confirmDisable: false })}>取消停用</button>

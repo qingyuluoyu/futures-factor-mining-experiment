@@ -6,30 +6,39 @@ import test from "node:test"
 import vm from "node:vm"
 import ts from "typescript"
 import * as researchApi from "../../lib/stock-research-api.ts"
+import { loadPendingWrites } from "../../lib/stock-pending-writes-harness.mjs"
 
 const requireModule = createRequire(import.meta.url)
 const Workspace = () => null
 const ModelLibrary = () => null
 const FactorLibrary = () => null
+const Banner = () => null
 const output = ts.transpileModule(readFileSync(new URL("./stock-research-entry.tsx", import.meta.url), "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText
 function elements(tree) { return Array.isArray(tree) ? tree.flatMap(elements) : tree && typeof tree === "object" ? [tree, ...elements(tree.props?.children)] : [] }
-function mount(auth, props = {}) {
+function mount(auth, props = {}, storage = new Map()) {
   const module = { exports: {} }
-  const slots = []; let cursor = 0
+  const slots = [], effects = []; let cursor = 0
   const dependencies = {
     react: {
       useRef(value) { const i = cursor++; if (!(i in slots)) slots[i] = { current: value }; return slots[i] },
       useState(value) { const i = cursor++; if (!(i in slots)) slots[i] = value; return [slots[i], (next) => { slots[i] = typeof next === "function" ? next(slots[i]) : next }] },
+      useEffect(callback) { effects.push(callback) },
     },
     "next/link": { default: "a" },
     "@/components/factor-research/factor-research-workspace": { FactorResearchWorkspace: Workspace },
     "@/components/factor-research/stock-model-library": { StockModelLibrary: ModelLibrary },
     "@/components/factor-research/stock-factor-library": { StockFactorLibrary: FactorLibrary },
+    "@/components/factor-research/stock-pending-writes-banner": { StockPendingWritesBanner: Banner },
     "@/lib/stock-research-api": researchApi,
     "@/stores/auth": { useAuthStore: (selector) => selector(auth) },
+    "@/lib/stock-pending-writes": loadPendingWrites(localStorageLike(storage), { crypto: globalThis.crypto }),
   }
   vm.runInNewContext(output, { module, exports: module.exports, require: (name) => dependencies[name] ?? requireModule(name) })
-  return { render: () => { cursor = 0; return module.exports.StockResearchEntry(props) }, setAuth: (value) => { auth = value } }
+  return { render: () => { cursor = 0; return module.exports.StockResearchEntry(props) }, flush() { effects.splice(0).forEach((callback) => callback()) },
+    setAuth: (value) => { auth = value } }
+}
+function localStorageLike(store) {
+  return { getItem: (key) => (store.has(key) ? store.get(key) : null), setItem: (key, value) => store.set(key, String(value)), removeItem: (key) => store.delete(key) }
 }
 function render(auth, props = {}) { return mount(auth, props).render() }
 function workspace(tree) { return elements(tree).find((node) => node.type === Workspace) }
@@ -105,5 +114,29 @@ test("stock route changes only add the business view and leave the complete futu
     const route = readFileSync(new URL(`../../app/(main)/${name}/page.tsx`, import.meta.url), "utf8")
     assert.ok(route.includes(`view="${view}"`))
     assert.equal(createHash("sha256").update(route.replace(` view="${view}"`, "")).digest("hex"), beforeSha)
+  }
+})
+
+test("the cross-page unconfirmed write banner covers every stock research route", () => {
+  const auth = { sessionRevision: 1, loaded: true, user: { id: "user", market_type: "stock" }, accessToken: token("user", "virtual") }
+  const entry = { kind: "dataset-job", idempotency_key: "k1", signature: "[]", created_at: "2026-10-26T00:00:00.000Z" }
+  // 三条研究路由都以本人 scope 挂上横幅；有没有条目由横幅自己决定（见其单测）
+  for (const [props, store] of [[{ initialTab: "analysis" }, new Map()], [{ initialTab: "backtest" }, new Map()],
+    [{ view: "library" }, new Map([["stock-pending-writes:user:virtual", JSON.stringify([entry])]])]]) {
+    const page = mount(auth, props, store)
+    page.flush()
+    const banner = elements(page.render()).find((node) => node.type === Banner)
+    assert.ok(banner, JSON.stringify(props))
+    assert.equal(banner.props.scope, "user:virtual")
+  }
+})
+
+test("the banner never mounts for a non-stock or unverified session", () => {
+  const store = new Map([["stock-pending-writes:user:virtual", JSON.stringify([{ kind: "dataset-job", idempotency_key: "k1", signature: "[]", created_at: "x" }])]])
+  for (const auth of [{ loaded: false, user: null, accessToken: null }, { loaded: true, user: { id: "user", market_type: "futures" }, accessToken: token("user", "virtual") },
+    { loaded: true, user: null, accessToken: token("user", "virtual") }]) {
+    const page = mount(auth, { initialTab: "analysis" }, store)
+    page.flush()
+    assert.equal(elements(page.render()).some((node) => node.type === Banner), false)
   }
 })

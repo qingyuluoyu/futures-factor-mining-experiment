@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs"
 import { createRequire } from "node:module"
 import vm from "node:vm"
 import ts from "typescript"
+import { loadPendingWrites, memoryStorage } from "../../lib/stock-pending-writes-harness.mjs"
 
 const elements = (tree) => Array.isArray(tree) ? tree.flatMap(elements) : tree && typeof tree === "object" ? [tree, ...elements(tree.props?.children)] : []
 const text = (tree) => Array.isArray(tree) ? tree.map(text).join("") : tree && typeof tree === "object" ? text(tree.props?.children) : tree == null || typeof tree === "boolean" ? "" : String(tree)
@@ -74,12 +75,14 @@ test("completed replay workspace mounts history independently of trading and pre
   let stateIndex = 0
   const overrides = { 0: { enabled: true, datasets: [] }, 3: accountId, 5: view, 6: false }
   const dependencies = {
-    react: { useState(initial) { const index = stateIndex++; return [index in overrides ? overrides[index] : initial, () => {}] }, useRef: (current) => ({ current }), useCallback: (callback) => callback, useEffect() {} },
+    react: { useState(initial) { const index = stateIndex++; return [index in overrides ? overrides[index] : typeof initial === "function" ? initial() : initial, () => {}] }, useRef: (current) => ({ current }), useCallback: (callback) => callback, useEffect() {} },
     "lucide-react": { ArrowRight: icon, ChevronLeft: icon, ChevronRight: icon, Loader2: icon, Plus: icon, RefreshCw: icon },
     "@/components/market/stock-kline-chart": { StockKlineChart: icon }, "@/components/ui/button": { Button: wrapper }, "@/components/ui/input": { Input: wrapper },
     "@/stores/auth": { useAuthStore: { getState: () => ({ user: { id: "owner", market_type: "stock", trading_mode: "virtual" } }) } },
     "@/stores/display": { useDisplayStore: (selector) => selector({ candleUp: "red", candleDown: "green" }) }, "@/lib/utils": { cn: (...values) => values.filter(Boolean).join(" ") },
     "@/lib/stock-replay-api": {}, "./stock-replay-state": { replayAccountStorageKey: () => "unused" }, "./stock-replay-order-history": { StockReplayOrderHistory: History },
+    "@/components/factor-research/stock-pending-writes-banner": { StockPendingWritesBanner: () => null },
+    "@/lib/stock-pending-writes": loadPendingWrites(memoryStorage()),
   }
   const module = { exports: {} }, requireModule = createRequire(import.meta.url)
   const source = readFileSync(new URL("./stock-replay-workspace.tsx", import.meta.url), "utf8")

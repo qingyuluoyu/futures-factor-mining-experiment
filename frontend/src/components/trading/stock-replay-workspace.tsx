@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import Link from "next/link"
 import { ArrowRight, ChevronLeft, ChevronRight, Loader2, Plus, RefreshCw } from "lucide-react"
 import { StockKlineChart } from "@/components/market/stock-kline-chart"
+import { StockPendingWritesBanner } from "@/components/factor-research/stock-pending-writes-banner"
 import { StockReplayOrderHistory } from "./stock-replay-order-history"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -17,6 +18,7 @@ import {
   type ReplayOrderInput, type ReplayView,
 } from "@/lib/stock-replay-api"
 import { prepareReplayMutation, replayAccountStorageKey, replayCreateError, replayOrderError, replayOrderReason } from "./stock-replay-state"
+import { clearPendingWrite, readPendingWrites, recordPendingWrite, type PendingWriteEntry } from "@/lib/stock-pending-writes"
 
 type ReplayTab = "overview" | "orders" | "positions" | "assets"
 const REPLAY_PAGES = [
@@ -30,6 +32,57 @@ type Mutation =
   | { kind: "order"; accountId: string; body: ReplayOrderInput }
   | { kind: "step"; accountId: string; body: ReplayCommand }
   | { kind: "cancel"; accountId: string; orderId: string; body: ReplayCommand }
+
+function replayAction(command: Mutation): string {
+  if (command.kind === "create") return "create"
+  if (command.kind === "order") return `order:${command.accountId}`
+  if (command.kind === "step") return `step:${command.accountId}`
+  return `cancel:${command.accountId}:${command.orderId}`
+}
+
+function replayIdempotencyKey(command: Mutation): string {
+  const key = (command.body as { idempotency_key?: unknown }).idempotency_key
+  return typeof key === "string" ? key : ""
+}
+
+/** 把一次回放写登记成跨页未确认写：只留 action + 负载 + 原幂等键，token 一律不落盘。 */
+function replayPendingEntry(command: Mutation): PendingWriteEntry {
+  const { idempotency_key: _key, expected_revision: revision, ...payload } = command.body as unknown as Record<string, unknown>
+  return {
+    kind: `replay-${command.kind}`,
+    idempotency_key: replayIdempotencyKey(command),
+    ...(typeof revision === "number" ? { expected_revision: revision } : {}),
+    signature: JSON.stringify([replayAction(command), payload]),
+    created_at: new Date().toISOString(),
+  }
+}
+
+/** 由注册表条目重建同一条写命令，使「重试同一请求」仍带原幂等键和原参数。 */
+function replayMutationFromEntry(entry: PendingWriteEntry): Mutation | null {
+  let action: unknown, payload: unknown
+  try {
+    [action, payload] = JSON.parse(entry.signature)
+  } catch {
+    return null
+  }
+  if (typeof action !== "string" || !payload || typeof payload !== "object" || Array.isArray(payload)) return null
+  const body = { ...(payload as Record<string, unknown>), idempotency_key: entry.idempotency_key, ...(entry.expected_revision === undefined ? {} : { expected_revision: entry.expected_revision }) }
+  if (entry.kind === "replay-create") return { kind: "create", body } as Mutation
+  if (entry.kind === "replay-order" && action.startsWith("order:")) return { kind: "order", accountId: action.slice(6), body } as Mutation
+  if (entry.kind === "replay-step" && action.startsWith("step:")) return { kind: "step", accountId: action.slice(5), body } as Mutation
+  if (entry.kind === "replay-cancel" && action.startsWith("cancel:")) {
+    const rest = action.slice(7), split = rest.lastIndexOf(":")
+    if (split <= 0 || split === rest.length - 1) return null
+    return { kind: "cancel", accountId: rest.slice(0, split), orderId: rest.slice(split + 1), body } as Mutation
+  }
+  return null
+}
+
+/** 挂载时回填未确认写，只回填当前用户与登录盘自己的条目。 */
+function replayPendingRetry(scope: string): Mutation | null {
+  const entry = readPendingWrites(scope).find((item) => item.kind.startsWith("replay-"))
+  return entry ? replayMutationFromEntry(entry) : null
+}
 
 const fieldClass = "w-full rounded border border-[var(--border)] bg-[var(--bg-primary)] px-2.5 py-2 text-sm text-[var(--text-primary)] disabled:opacity-50"
 const statusLabels = { pending: "待下一开盘", filled: "已成交", rejected: "已拒绝", cancelled: "已撤单" }
@@ -64,7 +117,8 @@ function ReplaySession({ userId, tradingMode, initialTab }: { userId: string; tr
   const [booting, setBooting] = useState(true)
   const [loading, setLoading] = useState(false)
   const [busy, setBusy] = useState(false)
-  const [retry, setRetry] = useState<Mutation | null>(null)
+  const pendingWriteScope = `${userId}:${tradingMode}`
+  const [retry, setRetry] = useState<Mutation | null>(() => replayPendingRetry(pendingWriteScope))
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
   const tab = initialTab
@@ -179,6 +233,7 @@ function ReplaySession({ userId, tradingMode, initialTab }: { userId: string; tr
     setError(null)
     setMessage(null)
     setRetry(null)
+    recordPendingWrite(pendingWriteScope, replayPendingEntry(command))
     try {
       let result: ReplayView
       switch (command.kind) {
@@ -191,6 +246,7 @@ function ReplaySession({ userId, tradingMode, initialTab }: { userId: string; tr
       if (result.trading_mode !== tradingMode || (command.kind !== "create" && result.id !== command.accountId)) throw new Error("回放账户响应不匹配，请重试同一请求")
       accountListSequence.current += 1
       setRetry(null)
+      clearPendingWrite(pendingWriteScope, replayIdempotencyKey(command))
       setLoading(false)
       rememberAccount(result.id)
       setAccounts((previous) => {
@@ -211,6 +267,7 @@ function ReplaySession({ userId, tradingMode, initialTab }: { userId: string; tr
       setError(errorMessage(failure))
       if (status !== undefined && status >= 400 && status < 500) {
         setRetry(null)
+        clearPendingWrite(pendingWriteScope, replayIdempotencyKey(command))
         if (command.kind !== "create") await refreshView(command.accountId, code)
       } else {
         setRetry(command)
@@ -267,6 +324,9 @@ function ReplaySession({ userId, tradingMode, initialTab }: { userId: string; tr
 
   return (
     <section aria-label={`${page.title}工作区`} className="flex h-full min-h-0 flex-col overflow-auto bg-[var(--bg-primary)] text-[var(--text-primary)]">
+      {/* 跨页未确认写横幅：本工作区覆盖 /trading、/positions、/orders、/assets。
+          replay-* 由下方行内「重试同一请求」自己处理，用 ignore 排除，避免同一件事提示两遍。 */}
+      <div className="shrink-0 px-4 pt-3"><StockPendingWritesBanner scope={pendingWriteScope} ignore={(kind) => kind.startsWith("replay-")} /></div>
       <header className="flex shrink-0 flex-wrap items-center gap-3 border-b border-[var(--border)] bg-[var(--bg-secondary)] px-4 py-3">
         <div><h1 className="text-base font-semibold">{page.title}</h1><p className="mt-0.5 text-xs text-[var(--text-muted)]">历史数据模拟 · 非实时盘 · 不连接真实资金</p></div>
         {availability?.enabled && <div className="ml-auto flex flex-wrap items-center gap-2">
