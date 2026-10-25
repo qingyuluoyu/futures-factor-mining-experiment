@@ -5,6 +5,7 @@ from uuid import UUID
 from pydantic import Field, model_validator
 
 from app.schemas.stock_research_v2 import Contract, DatasetBuild, DatasetRef
+from app.schemas.stock_research_v2_jobs import JOB_KINDS, METHOD_VERSIONS, WORKFLOW_VERSIONS
 
 
 class JobListQuery(Contract):
@@ -18,7 +19,9 @@ class CancelDatasetJob(Contract):
 
 class DatasetJobSummary(Contract):
     id: UUID
-    kind: Literal["dataset"]
+    # Migration 021 widens the persisted kind/workflow/method allowlists; the
+    # single-dataset semantics of the *result* guard below are unchanged.
+    kind: Literal[*JOB_KINDS]
     status: Literal["pending", "running", "completed", "failed", "cancelled", "expired"]
     step: str = Field(max_length=64)
     attempts: int = Field(strict=True, ge=0, le=1)
@@ -29,8 +32,8 @@ class DatasetJobSummary(Contract):
     finished_at: datetime | None
     deadline_at: datetime | None
     queue_expires_at: datetime
-    method_version: Literal["stock-observation-manifest-v1"]
-    workflow_version: Literal["stock-v2-dataset-job-v1"]
+    method_version: Literal[*METHOD_VERSIONS]
+    workflow_version: Literal[*WORKFLOW_VERSIONS]
     result: DatasetRef | None
     error_code: str | None = Field(max_length=100)
 

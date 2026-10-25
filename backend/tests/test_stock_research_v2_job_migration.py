@@ -15,16 +15,21 @@ def test_v2_job_migration_is_additive_independent_and_preserves_database_result_
     assert not re.search(r"(?:^|;)\s*(ALTER|DROP|UPDATE|DELETE|TRUNCATE|INSERT)\b", sql, re.IGNORECASE)
     tables = set(V2JobBase.metadata.tables) - {"stock_research_v2_job_schema_versions"}
     assert set(re.findall(r"CREATE TABLE (\w+)", sql)) == tables
+    # Migration 021 additively widens these same two tables, so a column or
+    # constraint the model declares may legitimately be written by either file.
+    # 016 on its own must still stay free of destructive DDL and still create
+    # exactly these tables; nothing above is relaxed by widening this lookup.
+    widened = sql + (SCHEMA_PATH.parent / "20261025_021_stock_research_v2_task_chain.sql").read_text(encoding="utf8")
     for table in V2JobBase.metadata.sorted_tables:
         assert table.name not in Base.metadata.tables
         assert "CREATE TABLE" in str(CreateTable(table).compile(dialect=postgresql.dialect()))
         if table.name not in tables:
             continue
         for column in table.columns:
-            assert re.search(rf"\b{column.name}\b", sql)
+            assert re.search(rf"\b{column.name}\b", widened)
         for constraint in table.constraints:
             if constraint.name:
-                assert constraint.name in sql
+                assert constraint.name in widened
     assert "result_data_version IS NOT NULL" in sql
     assert "result_qualification IS NOT NULL" in sql
 

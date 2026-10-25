@@ -13,6 +13,7 @@ from tests.test_stock_research_job_service import job_database
 
 
 async def setup(factory, owner, root):
+    from app.models.stock_ml_registry import MLRegistryBase
     from app.models.stock_research_v2_job import V2JobBase, V2JobSchemaVersion
     from app.schemas.stock_research_v2 import Scope
     from app.schemas.stock_research_v2_jobs import CreateDatasetJob
@@ -21,6 +22,9 @@ async def setup(factory, owner, root):
     async with factory() as session:
         session.sync.connection().exec_driver_sql("PRAGMA foreign_keys=ON")
         V2JobBase.metadata.create_all(session.get_bind())
+        # Migration 021 adds result foreign keys into 019, so the throwaway engine
+        # has to carry the same prerequisite chain the real runner enforces.
+        MLRegistryBase.metadata.create_all(session.get_bind())
         session.add(V2JobSchemaVersion(version=SCHEMA_VERSION, checksum=hashlib.sha256(SCHEMA_PATH.read_bytes()).hexdigest()))
         archive = service(session, owner, root)
         source = await archive.archive_page(page(), idempotency_key=uuid4(), request_id="a" * 32)

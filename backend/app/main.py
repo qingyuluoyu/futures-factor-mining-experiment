@@ -2,6 +2,7 @@
 
 import asyncio
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -52,11 +53,15 @@ from app.api.stock_replay import router as stock_replay_router
 from app.api.stock_factors import router as stock_factors_router
 from app.api.stock_research_jobs import router as stock_research_jobs_router, research_ready
 from app.api.stock_research_reports import router as stock_research_reports_router
+from app.api.stock_dataset_jobs import router as stock_dataset_jobs_router
+from app.api.stock_research_v2 import router as stock_research_v2_router
 from app.services.stock_research_worker import StockResearchWorker
 from app.api.gp_jobs import router as gp_jobs_router
 from app.services.factor_mining.startup import start_gp_worker
 from app.services.stock_eod_sync import StockEodWorker, TeajoinEodSource
 from app.services.stock_archive_worker import StockArchiveWorker
+from app.services.stock_research_v2.artifacts import ArtifactStore
+from app.services.stock_research_v2.worker import StockResearchV2Worker
 from app.services.database_readiness import verify_database_schema
 from app.api.public import router as public_router
 from app.api.admin_api_keys import router as admin_api_keys_router
@@ -69,6 +74,7 @@ from app.services.scheduler import set_session_factory, start_scheduler, stop_sc
 from scripts.migrate_stock_eod import migrate_stock_eod
 from scripts.migrate_stock_daily_archive import migrate_stock_daily_archive
 from scripts.migrate_stock_archive_jobs import migrate_stock_archive_jobs
+from scripts.migrate_stock_research_v2_task_chain import migrate_stock_research_v2_task_chain
 
 
 async def _init_tables(engine) -> None:
@@ -945,6 +951,62 @@ async def _start_stock_archive(application: FastAPI, settings, logger) -> None:
                 logger.error("operation=stock_archive_start_cleanup error_type=%s", type(cleanup_error).__name__)
 
 
+async def _start_stock_research_v2(application: FastAPI, settings, logger) -> None:
+    """Mount the stock research v2 task chain behind an explicit, default-OFF switch.
+
+    Every state attribute this touches is assigned here, so a switch that is off
+    leaves the previously unassigned ``stock_v2_jobs_enabled`` /
+    ``stock_research_artifact_store`` bare attributes firmly at their fail-closed
+    defaults instead of relying on ``getattr`` fallbacks.  Migration 021 is checked
+    read-only and never applied from the lifecycle, and the explicit single-instance
+    lease worker is only started once 021 is registered and an artifact root exists.
+    """
+    application.state.stock_research_v2_task_chain_enabled = False
+    application.state.stock_v2_jobs_enabled = False
+    application.state.stock_research_artifact_store = None
+    application.state.stock_research_v2_worker = None
+    application.state.stock_research_v2_error_code = None
+    if not getattr(settings, "stock_research_v2_task_chain_enabled", False):
+        return
+    application.state.stock_research_v2_task_chain_enabled = True
+    factory = getattr(application.state, "session_factory", None)
+    try:
+        if factory is None:
+            raise RuntimeError("session factory unavailable")
+        async with asyncio.timeout(15), factory() as session:
+            await migrate_stock_research_v2_task_chain(await session.connection(), check=True)
+    except Exception as error:
+        application.state.stock_research_v2_task_chain_enabled = False
+        application.state.stock_research_v2_error_code = "v2_task_chain_migration_not_ready"
+        logger.error("operation=stock_research_v2_readiness error_code=v2_task_chain_migration_not_ready error_type=%s", type(error).__name__)
+        return
+    root = str(getattr(settings, "stock_research_v2_artifact_path", "") or "").strip()
+    if not root:
+        application.state.stock_research_v2_error_code = "v2_task_chain_artifact_root_missing"
+        logger.error("operation=stock_research_v2_startup error_code=v2_task_chain_artifact_root_missing")
+        return
+    worker = None
+    try:
+        store = ArtifactStore(Path(root))
+        worker = StockResearchV2Worker(factory, store)
+        worker.start()
+        application.state.stock_research_artifact_store = store
+        application.state.stock_research_v2_worker = worker
+        application.state.stock_v2_jobs_enabled = True
+    except Exception as error:
+        application.state.stock_research_v2_error_code = "v2_task_chain_worker_start_failed"
+        logger.error("operation=stock_research_v2_startup error_code=v2_task_chain_worker_start_failed error_type=%s", type(error).__name__)
+        if worker is not None:
+            try:
+                async with asyncio.timeout(15):
+                    await worker.stop()
+            except Exception as cleanup_error:
+                logger.error("operation=stock_research_v2_startup_cleanup error_type=%s", type(cleanup_error).__name__)
+        application.state.stock_research_artifact_store = None
+        application.state.stock_research_v2_worker = None
+        application.state.stock_v2_jobs_enabled = False
+
+
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     """应用生命周期：启动和关闭时管理数据库、Redis、APScheduler"""
@@ -973,6 +1035,7 @@ async def lifespan(application: FastAPI):
     set_session_factory(session_factory)
     await start_scheduler(redis_conn)
     application.state.stock_research_worker = None
+    await _start_stock_research_v2(application, settings, logger)
     await start_gp_worker(application, session_factory, settings)
     if settings.stock_research_jobs_enabled:
         async with session_factory() as session:
@@ -1013,6 +1076,12 @@ async def lifespan(application: FastAPI):
             await application.state.stock_research_worker.stop()
         if getattr(application.state, "gp_checkpoint_worker", None) is not None:
             await application.state.gp_checkpoint_worker.stop()
+        if getattr(application.state, "stock_research_v2_worker", None) is not None:
+            try:
+                async with asyncio.timeout(15):
+                    await application.state.stock_research_v2_worker.stop()
+            except Exception as error:
+                logger.error("operation=stock_research_v2_stop error_type=%s", type(error).__name__)
         await stop_ops_alert_subscriber()
         await stop_big_order_subscriber()
         await stop_notify_subscriber()
@@ -1091,6 +1160,8 @@ def create_app() -> FastAPI:
     application.include_router(stock_factors_router)
     application.include_router(stock_research_jobs_router)
     application.include_router(stock_research_reports_router)
+    application.include_router(stock_dataset_jobs_router, prefix="/api/stock")
+    application.include_router(stock_research_v2_router, prefix="/api/stock")
     application.include_router(gp_jobs_router)
     application.include_router(indicators_router)
 

@@ -5,7 +5,8 @@ from sqlalchemy import JSON, CheckConstraint, DateTime, ForeignKey, Index, Integ
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from app.models.stock_research_dataset import StockResearchDataset
+from app.models.stock_ml_registry import StockMLExperiment
+from app.models.stock_research_dataset import StockResearchDataset, StockResearchArtifact
 from app.models.user import User
 
 
@@ -18,13 +19,13 @@ class StockResearchV2Job(V2JobBase):
     __table_args__ = (
         UniqueConstraint("owner_id", "trading_mode", "idempotency_key", name="uq_stock_v2_job_key"),
         CheckConstraint("trading_mode IN ('virtual','live')", name="ck_stock_v2_job_mode"),
-        CheckConstraint("kind = 'dataset'", name="ck_stock_v2_job_kind"),
+        CheckConstraint("kind IN ('dataset','research_ic','backtest','benchmark','ml_train','report')", name="ck_stock_v2_job_kind"),
         CheckConstraint("status IN ('pending','running','completed','failed','cancelled','expired')", name="ck_stock_v2_job_status"),
         CheckConstraint("attempts BETWEEN 0 AND 1", name="ck_stock_v2_job_attempts"),
-        CheckConstraint("max_runtime_seconds BETWEEN 30 AND 300", name="ck_stock_v2_job_runtime"),
+        CheckConstraint("max_runtime_seconds BETWEEN 30 AND 900", name="ck_stock_v2_job_runtime"),
         CheckConstraint("max_queue_seconds BETWEEN 30 AND 900", name="ck_stock_v2_job_queue"),
         CheckConstraint("length(request_hash) = 64 AND length(request_id) = 32", name="ck_stock_v2_job_identity"),
-        CheckConstraint("(status = 'completed' AND result_dataset_id IS NOT NULL AND result_data_version IS NOT NULL AND result_qualification IS NOT NULL AND length(result_data_version) = 64 AND result_qualification = 'observation_only') OR (status <> 'completed' AND result_dataset_id IS NULL AND result_data_version IS NULL AND result_qualification IS NULL)", name="ck_stock_v2_job_result"),
+        CheckConstraint("(status = 'completed' AND result_dataset_id IS NOT NULL AND result_data_version IS NOT NULL AND result_qualification IS NOT NULL AND length(result_data_version) = 64 AND result_qualification = 'observation_only' AND result_experiment_id IS NULL AND result_report_sha256 IS NULL AND result_artifact_id IS NULL) OR (status = 'completed' AND result_experiment_id IS NOT NULL AND result_dataset_id IS NULL AND result_data_version IS NULL AND result_qualification IS NULL AND result_report_sha256 IS NULL AND result_artifact_id IS NULL) OR (status = 'completed' AND result_artifact_id IS NOT NULL AND result_report_sha256 IS NOT NULL AND length(result_report_sha256) = 64 AND result_dataset_id IS NULL AND result_data_version IS NULL AND result_qualification IS NULL AND result_experiment_id IS NULL) OR (status <> 'completed' AND result_dataset_id IS NULL AND result_data_version IS NULL AND result_qualification IS NULL AND result_experiment_id IS NULL AND result_report_sha256 IS NULL AND result_artifact_id IS NULL)", name="ck_stock_v2_job_result"),
         CheckConstraint("status <> 'running' OR (worker_token IS NOT NULL AND started_at IS NOT NULL AND deadline_at IS NOT NULL AND lease_expires_at IS NOT NULL)", name="ck_stock_v2_job_running"),
         CheckConstraint("(status IN ('pending','running') AND finished_at IS NULL) OR (status IN ('completed','failed','cancelled','expired') AND finished_at IS NOT NULL)", name="ck_stock_v2_job_finished"),
         Index("ix_stock_v2_job_scope", "owner_id", "trading_mode", "created_at", "id"),
@@ -58,11 +59,17 @@ class StockResearchV2Job(V2JobBase):
     result_dataset_id: Mapped[PythonUUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey(StockResearchDataset.id, ondelete="RESTRICT"), nullable=True)
     result_data_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
     result_qualification: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    # Migration 021 widens the result shape: a finished research task either hands
+    # back a fixed observation dataset, a registered native experiment, or a report
+    # artifact plus its digest.  Exactly one of the three is ever populated.
+    result_experiment_id: Mapped[PythonUUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey(StockMLExperiment.id, ondelete="RESTRICT"), nullable=True)
+    result_report_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    result_artifact_id: Mapped[PythonUUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey(StockResearchArtifact.id, ondelete="RESTRICT"), nullable=True)
 
 
 class StockResearchV2Worker(V2JobBase):
     __tablename__ = "stock_research_v2_workers"
-    __table_args__ = (CheckConstraint("name = 'stock-v2-dataset-job-v1'", name="ck_stock_v2_worker_name"),)
+    __table_args__ = (CheckConstraint("name IN ('stock-v2-dataset-job-v1','stock-v2-research-task-v1')", name="ck_stock_v2_worker_name"),)
     name: Mapped[str] = mapped_column(String(64), primary_key=True)
     instance_id: Mapped[PythonUUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     token: Mapped[PythonUUID] = mapped_column(UUID(as_uuid=True), nullable=False)

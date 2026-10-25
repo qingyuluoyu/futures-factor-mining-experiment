@@ -94,6 +94,11 @@ class Settings(BaseSettings):
     stock_eod_sync_enabled: bool = False
     stock_eod_catchup_enabled: bool = False
     stock_daily_archive_enabled: bool = False
+    # A股研究 v2 任务链（迁移 021 + 只读目录 + 显式租约执行器）。
+    # 默认关闭：关闭时 availability 仍然只读，list/cancel 不受影响。
+    stock_research_v2_task_chain_enabled: bool = False
+    # 固定产物根目录；留空时即使开关打开也不启动执行器。
+    stock_research_v2_artifact_path: str = ""
 
     # JWT 认证
     jwt_secret_key: str
