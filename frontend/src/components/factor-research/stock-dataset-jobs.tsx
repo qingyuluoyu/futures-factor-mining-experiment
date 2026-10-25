@@ -1,13 +1,16 @@
 "use client"
 
 import { useEffect, useRef, useState } from "react"
-import { cancelStockDatasetJob, getStockDatasetJob, getStockDatasetJobAvailability, listStockDatasetJobs, submitStockDatasetJob, type CreateDatasetJob, type DatasetJobDetail, type DatasetJobPage } from "@/lib/stock-dataset-jobs-api"
+import { cancelStockDatasetJob, getStockDatasetJob, getStockDatasetJobAvailability, isObservationDetail, listStockDatasetJobs, submitStockDatasetJob, type CreateDatasetJob, type DatasetJobDetail, type DatasetJobPage } from "@/lib/stock-dataset-jobs-api"
 import { clearPendingWrite, readPendingWrites, recordPendingWrite, type PendingWriteEntry } from "@/lib/stock-pending-writes"
 
 type Identity = { token: string; scope: string }
 type State = { identity: Identity; page: DatasetJobPage | null; offset: number; accepting: boolean; reason: string; loading: boolean; error: string; detail: DatasetJobDetail | null; retry: CreateDatasetJob | null; unregistered: boolean }
 const LIMIT = 20
 const labels = { pending: "等待执行", running: "执行中", completed: "观察归档已生成", cancelled: "已取消", expired: "已过期", failed: "失败" }
+/** 任务表按迁移021含六种 kind；本面板只提交观察归档，但必须把研究类型如实标出来，
+ *  不能因为自己不提交就把别人提交的研究任务显示成观察任务。 */
+const kindLabels = { dataset: "观察归档", research_ic: "因子IC", backtest: "回测", benchmark: "基准对照", ml_train: "排序训练", report: "研究报告" }
 const buttonClass = "rounded border border-[var(--border)] px-2 py-1.5 text-xs disabled:opacity-50"
 /** 本组件登记的未确认写类型；重试必须用签名里的**原**幂等键，服务端据此去重。 */
 const PENDING_KIND = "dataset-job"
@@ -133,10 +136,12 @@ export function StockDatasetJobs({ token, scope, command }: { token: string; sco
     {command && <div className="space-y-2 rounded border p-2"><p>待确认：{command.parameters.pool_id}，暖机{command.parameters.warmup_start}，{command.parameters.start} 至 {command.parameters.end}；{command.parameters.instruments.length}只证券、{command.parameters.source_ids.length}个固定来源。</p>
       <p className="break-all">股票池版本：{command.parameters.pool_version}；幂等键：{command.idempotency_key}</p>
       <button type="button" className={buttonClass} disabled={!visible.accepting || visible.loading || !!visible.error} onClick={() => submit(command, false)}>确认创建观察归档任务</button></div>}
-    {visible.page && <><p>任务共{visible.page.total}条；不是研究次数额度。</p><ul>{visible.page.items.map((item) => <li key={item.id} className="flex flex-wrap items-center justify-between gap-2 border-b py-2"><span className="break-all">{item.id} · {labels[item.status]}</span><button type="button" className={buttonClass} disabled={visible.loading || !!visible.error} onClick={() => inspect(item.id)}>查看固定参数</button></li>)}</ul>
+    {visible.page && <><p>任务共{visible.page.total}条；不是研究次数额度。</p><ul>{visible.page.items.map((item) => <li key={item.id} className="flex flex-wrap items-center justify-between gap-2 border-b py-2"><span className="break-all">{item.id} · {kindLabels[item.kind]} · {labels[item.status]}</span><button type="button" className={buttonClass} disabled={visible.loading || !!visible.error} onClick={() => inspect(item.id)}>查看固定参数</button></li>)}</ul>
       <div className="flex gap-2"><button type="button" className={buttonClass} disabled={visible.loading || visible.offset === 0} onClick={() => load(Math.max(0, visible.offset - LIMIT))}>上一页</button><button type="button" className={buttonClass} disabled={visible.loading || !visible.page.has_more || !!visible.error} onClick={() => load(visible.offset + LIMIT)}>下一页</button></div></>}
-    {visible.detail && <div className="space-y-2 rounded border p-2"><h4>{labels[visible.detail.status]}</h4><p className="break-all">任务：{visible.detail.id}；请求：{visible.detail.request_id}</p><p>{visible.detail.parameters.pool_id} · {visible.detail.parameters.start} 至 {visible.detail.parameters.end}</p>
-      <p className="break-all">固定来源：{visible.detail.parameters.source_ids.join("、")}</p><p className="break-all">股票池版本：{visible.detail.parameters.pool_version}</p>
+    {visible.detail && <div className="space-y-2 rounded border p-2"><h4>{kindLabels[visible.detail.kind]} · {labels[visible.detail.status]}</h4><p className="break-all">任务：{visible.detail.id}；请求：{visible.detail.request_id}</p>
+      {isObservationDetail(visible.detail) ? <><p>{visible.detail.parameters.pool_id} · {visible.detail.parameters.start} 至 {visible.detail.parameters.end}</p>
+        <p className="break-all">固定来源：{visible.detail.parameters.source_ids.join("、")}</p><p className="break-all">股票池版本：{visible.detail.parameters.pool_version}</p></>
+        : <p>这是研究类型任务；本面板只展开观察归档的固定来源与股票池，不改写研究参数。</p>}
       {visible.detail.error_code && <p>结束代码：{visible.detail.error_code}</p>}
       {visible.detail.result && <p className="break-all">观察数据集：{visible.detail.result.dataset_id}；版本：{visible.detail.result.data_version}；不可直接回测。</p>}
       <button type="button" className={buttonClass} disabled={visible.loading || !["pending", "running"].includes(visible.detail.status)} onClick={cancel}>取消所选任务</button></div>}

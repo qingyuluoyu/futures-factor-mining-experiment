@@ -9,15 +9,16 @@ import { loadPendingWrites, memoryStorage } from "../../lib/stock-pending-writes
 const requireModule = createRequire(import.meta.url)
 const id = "74490e6b-b979-4331-87d8-c25b809075dd"
 const parameters = { source_ids: [id], pool_id: "本人固定池", pool_version: "a".repeat(64), instruments: ["000001.SZ"], start: "2026-01-05", end: "2026-01-06", warmup_start: "2026-01-05" }
-const detail = { id, status: "pending", parameters, request_id: "a".repeat(32), result: null, error_code: null }
+const detail = { id, kind: "dataset", status: "pending", parameters, request_id: "a".repeat(32), result: null, error_code: null }
 const settle = () => new Promise((resolve) => setImmediate(resolve))
 const pendingKey = "stock-pending-writes:owner:virtual"
 
-function mount({ accepting = false, fails = false, submitFails = false, failFirstSubmit = false, command, storage } = {}) {
+function mount({ accepting = false, fails = false, submitFails = false, failFirstSubmit = false, command, storage, items } = {}) {
   const slots = [], effects = [], calls = []
   let cursor = 0
   const props = { token: "token-one", scope: "owner:virtual", command }
   const controls = { deferred: null, fails, submitFails, failFirstSubmit, submits: 0, deferredSubmit: null }
+  const listed = items ?? [detail]
   const dependencies = {
     react: {
       useState(initial) { const index = cursor++; if (!(index in slots)) slots[index] = typeof initial === "function" ? initial() : initial; return [slots[index], (value) => { slots[index] = typeof value === "function" ? value(slots[index]) : value }] },
@@ -26,11 +27,14 @@ function mount({ accepting = false, fails = false, submitFails = false, failFirs
     },
     "@/lib/stock-dataset-jobs-api": {
       getStockDatasetJobAvailability: async (token) => { calls.push({ kind: "availability", token }); if (controls.fails) throw new Error("任务源未连接"); return { accepting, research_enabled: false, reason: "仅观察，计算未开放" } },
-      listStockDatasetJobs: async (query, token) => { calls.push({ kind: "list", token }); return { items: [detail], total: 1, has_more: false } },
+      listStockDatasetJobs: async (query, token) => { calls.push({ kind: "list", token }); return { items: listed, total: listed.length, has_more: false } },
       getStockDatasetJob: async (identifier, token, signal) => { calls.push({ kind: "detail", token, signal }); return controls.deferred ?? detail },
       cancelStockDatasetJob: async (identifier, token) => { calls.push({ kind: "cancel", token }); return { ...detail, status: "cancelled" } },
       submitStockDatasetJob: async (value, token) => { calls.push({ kind: "submit", value, token }); controls.submits += 1
         if (controls.submitFails && !(controls.failFirstSubmit && controls.submits > 1)) throw new Error("提交结果未知"); return controls.deferredSubmit ?? detail },
+      // The real one narrows on the persisted kind *and* the payload shape; the mock keeps
+      // that contract so a research-shaped payload cannot be read as an observation build.
+      isObservationDetail: (job) => job?.kind === "dataset" && !!job.parameters && Array.isArray(job.parameters.source_ids),
     },
     "@/lib/stock-pending-writes": loadPendingWrites(storage ?? memoryStorage(), { crypto: globalThis.crypto }),
   }
@@ -78,8 +82,30 @@ test("explicit confirmation submits the same key and cancellation works while ac
   readonly.unmount()
 })
 
-test("identity switch hides prior details immediately and drops delayed old-session replies", async () => {
-  const view = mount()
+// Migration 021 puts research kinds in the same task table, so the shared panel sees them
+// even though it only ever submits observation builds.  It must name the kind it got and
+// must not invent observation fields for a payload that has none.
+const researchId = "5df7727e-dc73-428c-a526-83de24a1fcde"
+test("a research job in the shared table is labelled by kind and never rendered as observation parameters", async () => {
+  const research = { ...detail, id: researchId, kind: "research_ic", parameters: { kind: "research_ic", dataset: { dataset_id: id, data_version: "b".repeat(64), qualification: "research_only" }, factors: { factor_ids: ["ret_20d"], custom_factors: [], action: "analysis", industry_neutral: false, mktcap_neutral: false, weight: "equal" }, horizon: 20, groups: 5, decay_lags: [1, 5, 10, 20] } }
+  const view = mount({ items: [detail, research] })
+  await view.ready()
+  assert.match(text(view.render()), /观察归档/)
+  assert.match(text(view.render()), /因子IC/)
+  view.controls.deferred = research
+  nodes(view.render()).filter((node) => node.type === "button" && text(node) === "查看固定参数").at(-1).props.onClick()
+  await view.ready()
+  const shown = text(view.render())
+  assert.match(shown, /因子IC/)
+  assert.match(shown, /研究类型任务/)
+  // The observation-only fields belong to the observation build; a research payload has none.
+  assert.doesNotMatch(shown, /固定来源：/)
+  assert.doesNotMatch(shown, /本人固定池/)
+  assert.match(shown, new RegExp(researchId))
+  view.unmount()
+})
+
+test("identity switch hides prior details immediately and drops delayed old-session replies", async () => {  const view = mount()
   await view.ready()
   let resolve
   view.controls.deferred = new Promise((done) => { resolve = done })
