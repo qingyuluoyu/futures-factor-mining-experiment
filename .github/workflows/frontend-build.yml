@@ -1,0 +1,160 @@
+# 前端 CI 构建 —— 在 GitHub Runner 上产出 Next.js standalone 产物
+#
+# 背景（2026-10-25 本地构建失败诊断结论）：
+#   1. 本机 15.3GB 内存在全栈运行期会被 SWC 的 Rust worker 耗尽
+#      （退出码 0xC0000409），项目原有的 RAYON_NUM_THREADS / NODE_OPTIONS
+#      限制都管不到这个进程，改不动。
+#   2. output:"standalone" 的 build trace 阶段需要创建符号链接，本机非管理员
+#      shell 没有 SeCreateSymbolicLinkPrivilege 且未开开发者模式，报 EPERM。
+#
+# GitHub Runner（4 vCPU / 16GB / Linux）两个问题都不存在：
+#   - 内存充足，无需本项目额外调优
+#   - Linux 创建符号链接无需 Windows 特权
+#
+# 因此本地只保留预览构建（WENYUAN_PREVIEW_BUILD=1 pnpm build，快且无 symlink），
+# 生产 standalone 产物统一由本工作流产出，打包后作为 artifact 下载直接运行：
+#   unzip frontend-dist.zip -d app && cd app && node server.js
+#   （若 runner 无 zip 则产出 frontend-dist.tar.gz，用 tar -xzf 解包，内容一致）
+#
+# 注意 BACKEND_URL 是构建期烘进产物的（next.config.ts 的 rewrites destination，
+# 实测已固化在 .next/required-server-files.json 的 _originalRewrites 里，运行期
+# 改环境变量无效）。默认值 http://qihuo-backend:8001 是 docker-compose 服务名，
+# 与 frontend/Dockerfile 一致，适合容器内部署。若要在裸机/Windows 上跑下载的
+# artifact，请用 workflow_dispatch 的 backend_url 输入显式指定，例如
+# http://127.0.0.1:8001。
+
+name: frontend-build
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "frontend/**"
+      - ".github/workflows/frontend-build.yml"
+  pull_request:
+    branches: [master]
+    paths:
+      - "frontend/**"
+      - ".github/workflows/frontend-build.yml"
+  workflow_dispatch:
+    inputs:
+      backend_url:
+        description: "rewrites 反代目标（构建期固化，运行期不可改）。默认 docker-compose 服务名；裸机运行填 http://127.0.0.1:8001"
+        required: false
+        default: "http://qihuo-backend:8001"
+
+# 同一分支连续推送时取消上一轮未完成的构建，避免浪费额度
+concurrency:
+  group: frontend-build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NEXT_TELEMETRY_DISABLED: "1"
+  # 与 frontend/Dockerfile 保持一致：不注入 NEXT_PUBLIC_*，
+  # 留空即走相对路径 /api/*，由 next.config.ts 的 rewrites 反代到 BACKEND_URL
+
+jobs:
+  build:
+    name: build standalone
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # pnpm 必须先于 setup-node 安装，setup-node 的 cache:pnpm 才生效
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          # lockfile 在 frontend/ 子目录，不在仓库根，必须显式指定
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # 门禁 1：类型检查。next build 本身也带类型检查，提前一步失败更快定位
+      - name: Typecheck
+        run: pnpm exec tsc --noEmit
+
+      # 门禁 2：生产构建。Linux 下 output:"standalone" 可正常创建符号链接
+      - name: Build
+        run: pnpm build
+        env:
+          # inputs 上下文仅在 workflow_dispatch 下有值，push/PR 时为空 →
+          # 回落到 docker-compose 服务名，与 frontend/Dockerfile 默认一致
+          BACKEND_URL: ${{ inputs.backend_url || 'http://qihuo-backend:8001' }}
+
+      # 把 .next/standalone + .next/static + public 组装成开箱可用的目录结构，
+      # 与 frontend/Dockerfile 运行期三段 COPY 的产物完全一致
+      - name: Assemble runnable bundle
+        run: |
+          set -euo pipefail
+          rm -rf .bundle
+          mkdir -p .bundle/.next
+          # cp -a 保留符号链接（standalone 的 node_modules 可能含 pnpm 链接，
+          # cp -R 的解引用行为有歧义，-a 等价 -dR --preserve=all，确定不跟链接）
+          cp -a .next/standalone/. .bundle/
+          # 不同 Next 小版本对 standalone 内是否已含 static/public 行为不一致，
+          # 先删再拷，保证最终内容以本次构建产物为准
+          rm -rf .bundle/.next/static .bundle/public
+          cp -a .next/static .bundle/.next/static
+          cp -a public .bundle/public
+          {
+            echo "commit    : ${{ github.sha }}"
+            echo "ref       : ${{ github.ref_name }}"
+            echo "built_at  : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "build_id  : $(cat .next/BUILD_ID)"
+            echo "node      : $(node --version)"
+            echo "backend   : ${{ inputs.backend_url || 'http://qihuo-backend:8001' }} (构建期固化，运行期不可改)"
+          } > .bundle/BUILD_INFO.txt
+          # zip -y 按符号链接存储；不加 -y 会解引用，遇悬空链接直接报错。
+          # ubuntu-latest 预装 zip，但仍留 tar 兜底，避免 runner 镜像变动导致失败
+          if command -v zip >/dev/null 2>&1; then
+            (cd .bundle && zip -qry ../frontend-dist.zip .)
+          else
+            echo "[!] zip 不可用，改用 tar.gz"
+            tar -czf frontend-dist.tar.gz -C .bundle .
+          fi
+          echo "bundle size: $(du -sh .bundle | cut -f1)"
+
+      - name: Upload standalone artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-standalone-${{ github.sha }}
+          # zip / tar.gz 二选一，另一个路径不存在时 upload-artifact 只告警不失败
+          path: |
+            frontend/frontend-dist.zip
+            frontend/frontend-dist.tar.gz
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## 前端构建 ${{ job.status }}"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "| --- | --- |"
+            echo "| commit | \`${{ github.sha }}\` |"
+            echo "| build_id | \`$(cat .next/BUILD_ID 2>/dev/null || echo n/a)\` |"
+            echo "| artifact | \`frontend-standalone-${{ github.sha }}\` |"
+            echo ""
+            echo "下载后：\`unzip frontend-dist.zip -d app && cd app && node server.js\`（tar.gz 则 \`tar -xzf frontend-dist.tar.gz -C app\`）"
+            echo ""
+            echo "反代目标（构建期固化）：\`${{ inputs.backend_url || 'http://qihuo-backend:8001' }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
