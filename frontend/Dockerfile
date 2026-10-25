@@ -39,6 +39,14 @@ ENV NEXT_TELEMETRY_DISABLED=1
 
 RUN pnpm build
 
+# pnpm 的 node_modules 是符号链接布局，Next 的 nft 追踪只把 app 的直接依赖提升到
+# standalone 顶层，next 自己的运行时依赖（styled-jsx / postcss / caniuse-lite /
+# @next/env / @swc/helpers）和 react-dom 仍只在 .pnpm 存储里，直接
+# node server.js 会 MODULE_NOT_FOUND。内容都在，断的只是解析路径，这里补齐成
+# 顶层实体目录，运行期下面三段 COPY 才能拿到真正可启动的产物。
+# 完整根因与多版本防护见 scripts/repair-standalone-pnpm-layout.mjs 头部注释。
+RUN node scripts/repair-standalone-pnpm-layout.mjs .next/standalone
+
 # Stage 3: 精简运行时镜像
 FROM node:22-alpine AS runner
 WORKDIR /app

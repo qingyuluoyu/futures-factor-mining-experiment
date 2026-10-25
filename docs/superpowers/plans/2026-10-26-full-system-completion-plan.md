@@ -33,6 +33,52 @@ artifact：`frontend-standalone-f0aec17…`，**21,222,355 字节**，保留 14 
 `before ac32da4674879516506d9c173bab34d7009615abb546713d01901e967e4d6bf5`
 `after  96e8eea92f5dcb35917f35e085a8adbeca5e8c7a063a040a654ad25812add5b2`
 
+### 0.1.1 CI 产物「九步全绿但不可运行」的根因与修复（2026-10-26 实测）
+
+上面 9/9 成功只证明**构建通过**，不证明**产物能跑**。下载 `frontend-standalone-f0aec17…` 解压后实跑：
+
+```text
+$ node server.js
+Error: Cannot find module 'styled-jsx/package.json'
+Require stack:
+- node_modules/next/dist/server/require-hook.js
+- node_modules/next/dist/server/next.js
+- node_modules/server.js
+```
+
+**根因**：pnpm 的 `node_modules` 是符号链接布局。Next 用 nft 做文件追踪时，只把 app 的直接依赖（`next` / `react` / `typescript`）提升到 standalone 的顶层 `node_modules/`；`next` 自己的运行时依赖 `styled-jsx`、`postcss`、`caniuse-lite`、`@next/env`、`@swc/helpers`，以及 `react-dom`，仍只存在于 `.pnpm` 存储里。Node 从 `node_modules/next/dist/server/require-hook.js` 出发向上逐级解析，永远找不到它们。
+
+内容其实都在：`.pnpm/styled-jsx@5.1.6_react@19.2.6/node_modules/styled-jsx/` 完整存在（`dist/`、`index.js`、`package.json`、`style.js`），**断的只是解析路径**，不是缺文件。
+
+**同一缺陷也在 `frontend/Dockerfile`**：其运行期做的正是 `.next/standalone` + `.next/static` + `public` 三段 COPY 后 `CMD ["node","server.js"]`，与 CI 组装步骤同构。该镜像此前从未被真正启动验证过，所以一直没暴露。此前裸机 3001 端口跑的是 `WENYUAN_PREVIEW_BUILD=1` 的**非 standalone** 构建（`next.config.ts:10` 此时 `output: undefined`），绕开了这条路径。
+
+**修复**（单一来源，CI 与 Dockerfile 共用）：
+
+| 文件 | 改动 |
+|---|---|
+| `frontend/scripts/repair-standalone-pnpm-layout.mjs` | 新增。把 `.pnpm` 存储里缺失的传递依赖补齐为顶层**实体目录** |
+| `.github/workflows/frontend-build.yml` | 组装后加 `Repair pnpm standalone node_modules`；再加 `Smoke test standalone boot` 门禁 |
+| `frontend/Dockerfile` | builder 阶段 `pnpm build` 之后对 `.next/standalone` 跑同一脚本 |
+
+用实体目录而非符号链接：CI 产物要能下载到 Windows 上解压即用，而 Windows 创建符号链接需要 `SeCreateSymbolicLinkPrivilege` 或开发者模式。
+
+**多版本防护**（实测踩到后才加的）：同一个包在 `.pnpm` 里常有**多条来源**——`.pnpm/next@…/node_modules/postcss` 本是指向 `.pnpm/postcss@8.4.31/node_modules/postcss` 的符号链接，被 nft 解引用后变成实体副本。按路径判重会把这种正常形态误判成"多版本冲突"并让 CI 卡死（第一版脚本就这样，本地实测已复现）。故改为读各来源 `package.json` 的 `version` 比大小：一致则放行并优先取存储本尊；真有不同的版本号才 `exit 1` 拒绝猜测。
+
+**本地已验证**（不是 CI 里等结果，是先把产物跑起来再改工作流）：
+
+| 项 | 结果 |
+|---|---|
+| 未修补产物启动 | **失败** `MODULE_NOT_FOUND styled-jsx/package.json` |
+| 修补后启动 | `✓ Ready in 520ms` |
+| `/` `/login` `/dashboard` `/market` | 200 |
+| 未知路由 | 404（证明是真路由，不是 catch-all） |
+| `/_next/static/css/0fc8a2c545c1cdcf.css` | 200，110,732 B（证明 static 组装对了） |
+| `/ai-icons/ai360.png`（public） | 200，10,781 B（证明 public 挂根正确） |
+| `/api/health` | 500 —— **预期**，`BACKEND_URL` 固化的 `qihuo-backend:8001` 在裸机不可解析 |
+| 冒烟服务 | 已 kill，端口 3999 已释放，未触碰五个冻结端口 |
+
+脚本自身四条路径均实测：未修补（补齐 16 个包）/ 已完整（无需处理）/ 真多版本（`exit 1` 且不拷）/ 路径写错（`exit 1`，不静默放行）。
+
 ### 0.2 剩余四包（承接执行18末）
 
 | 包 | 内容 | 状态 | 阻塞 |
@@ -53,8 +99,10 @@ artifact：`frontend-standalone-f0aec17…`，**21,222,355 字节**，保留 14 
 
 | 文件 | 改动 | 理由 |
 |---|---|---|
-| `.github/workflows/frontend-build.yml` | 新增 160 行 | CI 构建 standalone，根治本地内存墙与 Windows symlink EPERM |
+| `.github/workflows/frontend-build.yml` | 新增 | CI 构建 standalone，根治本地内存墙与 Windows symlink EPERM；后按 §0.1.1 增加 repair + 冒烟两步 |
 | `frontend/pnpm-workspace.yaml` | 补 `packages: ["."]` + 5 行注释 | CI 安装失败根因；字节备份与 patch 见 `logs/ci-fix-pnpm-workspace-20261025/` |
+| `frontend/scripts/repair-standalone-pnpm-layout.mjs` | 新增 | §0.1.1 根因修复；CI 与 Dockerfile 共用同一实现，避免两份逻辑漂移 |
+| `frontend/Dockerfile` | builder 阶段 `pnpm build` 后加 1 行 `RUN node scripts/repair-…` + 4 行注释 | 同一缺陷也在此镜像里；只增不减，未改任何既有指令、ARG、ENV、LABEL |
 
 ### 1.2 冻结（SHA 锚定，不得修改）
 

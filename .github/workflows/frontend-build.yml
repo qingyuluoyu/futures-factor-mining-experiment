@@ -22,6 +22,18 @@
 # 与 frontend/Dockerfile 一致，适合容器内部署。若要在裸机/Windows 上跑下载的
 # artifact，请用 workflow_dispatch 的 backend_url 输入显式指定，例如
 # http://127.0.0.1:8001。
+#
+# 2026-10-26 实测补记（"Assemble runnable bundle" 之后必须接两步修复/门禁的原因）：
+#   下载 2026-10-25 首次成功的 artifact 解压后 node server.js 直接
+#   MODULE_NOT_FOUND: Cannot find module 'styled-jsx/package.json'。
+#   根因：pnpm 的 node_modules 是符号链接布局，Next 的 nft 追踪只把 app 的直接
+#   依赖（next / react / typescript）提升到 standalone 的顶层 node_modules/，
+#   next 自己的运行时依赖 styled-jsx、postcss、caniuse-lite、@next/env、
+#   @swc/helpers 以及 react-dom 仍只存在于 .pnpm 存储里。Node 从
+#   node_modules/next/dist/server/require-hook.js 向上逐级解析时找不到它们。
+#   frontend/Dockerfile 运行期做同样的三段 COPY，因此镜像有同一问题——
+#   该镜像此前从未被真正启动验证过。这里用实体目录补齐而非符号链接，因为产物
+#   要能下载到 Windows 上解压即用，而 Windows 创建符号链接需要特权。
 
 name: frontend-build
 
@@ -130,6 +142,50 @@ jobs:
             tar -czf frontend-dist.tar.gz -C .bundle .
           fi
           echo "bundle size: $(du -sh .bundle | cut -f1)"
+
+      # 补齐 pnpm 布局下未被提升的传递依赖（见文件头 2026-10-26 补记）。
+      # 只作用于 .bundle，不动 Next 自己产出的 .next/standalone。
+      - name: Repair pnpm standalone node_modules
+        run: node scripts/repair-standalone-pnpm-layout.mjs .bundle
+
+      # 门禁 3：产物必须真的能启动并提供页面。
+      # 上一轮 CI 九步全绿，但下载后 node server.js 直接 MODULE_NOT_FOUND——
+      # 构建成功不等于产物可运行，所以这一步必须有。
+      # 不测 /api/*：BACKEND_URL 固化的是 docker-compose 服务名，runner 上
+      # 必然反代失败（500），那是预期，不是缺陷。
+      - name: Smoke test standalone boot
+        run: |
+          set -euo pipefail
+          cd .bundle
+          PORT=3199 HOSTNAME=127.0.0.1 NODE_ENV=production node server.js > ../smoke.log 2>&1 &
+          SRV=$!
+          trap 'kill $SRV 2>/dev/null || true' EXIT
+          ready=0
+          for i in $(seq 1 40); do
+            if curl -fsS -o /dev/null -m 5 http://127.0.0.1:3199/login; then ready=1; break; fi
+            kill -0 $SRV 2>/dev/null || break
+            sleep 1
+          done
+          home=$(curl -s -o /dev/null -w '%{http_code}' -m 15 http://127.0.0.1:3199/ || echo 000)
+          unknown=$(curl -s -o /dev/null -w '%{http_code}' -m 15 http://127.0.0.1:3199/__no_such_route__ || echo 000)
+          html=$(curl -s -m 15 http://127.0.0.1:3199/ || echo '')
+          asset=$(printf '%s' "$html" | grep -o '/_next/static/[^"]*\.css' | head -1 || true)
+          asset_code=000
+          if [ -n "$asset" ]; then
+            asset_code=$(curl -s -o /dev/null -w '%{http_code}' -m 15 "http://127.0.0.1:3199$asset" || echo 000)
+          fi
+          kill $SRV 2>/dev/null || true
+          wait $SRV 2>/dev/null || true
+          trap - EXIT
+          echo "ready=$ready home=$home unknown_route=$unknown"
+          echo "static_css=${asset:-<none>} status=$asset_code"
+          echo "--- server log ---"
+          cat ../smoke.log
+          [ "$ready" = "1" ] || { echo "::error::standalone 服务 40s 内未就绪"; exit 1; }
+          [ "$home" = "200" ] || { echo "::error::首页返回 $home，期望 200"; exit 1; }
+          [ "$unknown" = "404" ] || { echo "::error::未知路由返回 $unknown，期望 404"; exit 1; }
+          [ -n "$asset" ] || { echo "::error::首页 HTML 未引用任何 /_next/static css，static 可能没组装进去"; exit 1; }
+          [ "$asset_code" = "200" ] || { echo "::error::静态 css $asset 返回 $asset_code"; exit 1; }
 
       - name: Upload standalone artifact
         uses: actions/upload-artifact@v4
