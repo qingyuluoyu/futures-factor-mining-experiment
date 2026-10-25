@@ -7,13 +7,20 @@ export const datasetRefSchema = z.object({ dataset_id: z.uuid(), data_version: d
 export type DatasetRef = z.infer<typeof datasetRefSchema>
 const itemSchema = datasetRefSchema.extend({ artifact_state: z.enum(["ready", "quarantined"]), integrity: z.literal("not_checked"), created_at: z.iso.datetime({ offset: true }) })
 export type DatasetCatalogItem = z.infer<typeof itemSchema>
-const availabilitySchema = z.object({ catalog_enabled: z.boolean(), detail_enabled: z.boolean(), inspection_enabled: z.literal(false), research_enabled: z.literal(false), parquet_enabled: z.literal(false), reason: z.string().max(500) }).strict()
+// These three are plain booleans on the server: ``research_enabled`` is
+// ``ready && qualification_ready && artifact_root``, ``inspection_enabled`` is
+// ``ready && qualification_ready`` and ``parquet_enabled`` mirrors the columnar
+// engine.  They are false today only because migration 020 is not applied yet, so
+// pinning them to ``false`` here would make the client reject the real answer — and
+// break this panel — on the day 020 is registered.  The backend still refuses every
+// graded capability until then, so accepting ``true`` grants nothing by itself.
+const availabilitySchema = z.object({ catalog_enabled: z.boolean(), detail_enabled: z.boolean(), inspection_enabled: z.boolean(), research_enabled: z.boolean(), parquet_enabled: z.boolean(), reason: z.string().max(500) }).strict()
 export type DatasetAvailability = z.infer<typeof availabilitySchema>
 const pageSchema = z.object({ items: z.array(itemSchema).max(100), total: z.number().int().nonnegative(), has_more: z.boolean() }).strict()
 export type DatasetCatalogPage = z.infer<typeof pageSchema>
 const instrument = z.string().regex(/^(?:6\d{5}\.SH|[03]\d{5}\.SZ|[489]\d{5}\.BJ)$/)
 const sourceSchema = z.object({ source_id: z.uuid(), sha256: digest, byte_size: z.number().int().positive().max(64 * 1024 * 1024), row_count: z.number().int().min(1).max(10000), kind: z.enum(["daily", "valuation", "financial"]) }).strict()
-const descriptionSchema = z.object({ reference: datasetRefSchema, manifest_version: z.literal("stock-observation-manifest-v1"), start: z.iso.date(), end: z.iso.date(), warmup_start: z.iso.date(), pool_id: z.string().min(1).max(100), pool_version: digest, instruments: z.array(instrument).min(1).max(10000), sources: z.array(sourceSchema).min(1).max(1000), integrity: z.literal("manifest_verified_sources_not_checked"), research_enabled: z.literal(false), limitations: z.array(z.string().max(500)).max(20) }).strict().superRefine((value, context) => {
+const descriptionSchema = z.object({ reference: datasetRefSchema, manifest_version: z.literal("stock-observation-manifest-v1"), start: z.iso.date(), end: z.iso.date(), warmup_start: z.iso.date(), pool_id: z.string().min(1).max(100), pool_version: digest, instruments: z.array(instrument).min(1).max(10000), sources: z.array(sourceSchema).min(1).max(1000), integrity: z.literal("manifest_verified_sources_not_checked"), research_enabled: z.boolean(), limitations: z.array(z.string().max(500)).max(20) }).strict().superRefine((value, context) => {
   if (!(value.warmup_start <= value.start && value.start <= value.end)
     || new Set(value.instruments).size !== value.instruments.length
     || new Set(value.sources.map((source) => source.source_id)).size !== value.sources.length

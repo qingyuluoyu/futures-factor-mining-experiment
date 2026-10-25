@@ -50,6 +50,27 @@ test("availability preserves disabled computation and failures surface request i
   })
 })
 
+test("availability reports the real graded capability the server returns instead of rejecting it", async () => {
+  // The server derives these from migration 020 actually being registered, so the day
+  // 020 is applied it answers true.  A client that pins them to false would fail to
+  // parse the whole response and break the panel exactly when research becomes usable.
+  await withFetch(async () => Response.json({ catalog_enabled: true, detail_enabled: true, inspection_enabled: true, research_enabled: true, parquet_enabled: true, reason: "资格分级已登记" }), async () => {
+    const availability = await api.getStockDatasetAvailability("token")
+    assert.equal(availability.research_enabled, true)
+    assert.equal(availability.inspection_enabled, true)
+    assert.equal(availability.parquet_enabled, true)
+    assert.equal(availability.detail_enabled, true)
+  })
+  await withFetch(async () => Response.json({ ...description, reference: { ...reference, qualification: "research_only" }, research_enabled: true }), async () => {
+    const detail = await api.getStockDatasetDescription({ ...reference, qualification: "research_only" }, "token")
+    assert.equal(detail.research_enabled, true)
+  })
+  // A non-boolean is still refused rather than coerced into a capability claim.
+  await withFetch(async () => Response.json({ catalog_enabled: true, detail_enabled: false, inspection_enabled: "yes", research_enabled: false, parquet_enabled: false, reason: "x" }), async () => {
+    await assert.rejects(api.getStockDatasetAvailability("token"))
+  })
+})
+
 test("oversized or non-JSON replies never get treated as empty datasets", async () => {
   await withFetch(async () => new Response("x".repeat(1100000)), async () => { await assert.rejects(api.listStockDatasets({}, "token"), /大小/) })
   await withFetch(async () => new Response("<html>unexpected</html>"), async () => { await assert.rejects(api.listStockDatasets({}, "token"), /JSON/) })
