@@ -1,2 +1,9 @@
+# 本仓库是单包项目（lockfile 只有一个 importer "."）。pnpm 一发现本文件就把
+# frontend/ 当作 workspace 根，此时 packages 为必填项；缺失时报
+# "packages field missing or empty"，pnpm install 直接退出 1。
+# frontend/Dockerfile 的 deps 阶段只 COPY package.json + pnpm-lock.yaml，
+# 从不复制本文件，所以镜像构建一直不受影响；CI 全量 checkout 才会踩到。
+packages:
+  - "."
 allowBuilds:
   sharp: true
