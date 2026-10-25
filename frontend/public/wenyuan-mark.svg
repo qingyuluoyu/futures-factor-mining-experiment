@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <title>闻苑</title>
+  <rect width="64" height="64" rx="17" fill="#123F3A"/>
+  <path d="M18 47V20a2 2 0 0 1 2-2h24a2 2 0 0 1 2 2v27M18 25h28" stroke="#F4F7ED" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M24 31v15c3-1.5 5.7-1.5 8 0 2.3-1.5 5-1.5 8 0V31M32 33v13" stroke="#F4F7ED" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="m24 39 5-5 5 3 6-7" stroke="#DCC184" stroke-width="2.7" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="40" cy="30" r="2.2" fill="#DCC184"/>
+</svg>

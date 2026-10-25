@@ -1,0 +1,3 @@
+# Optional stock-only columnar runtime. CPython 3.12 Windows x64 wheel.
+# Install only into an explicitly isolated target; do not alter the futures venv.
+pyarrow==26.0.0 --hash=sha256:cc903e1069e9dd5e9dcf780324c0112e27e051e422ecfaff574fb33ed65d9160

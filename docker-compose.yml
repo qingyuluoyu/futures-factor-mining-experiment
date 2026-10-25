@@ -1,0 +1,239 @@
+# qihuo 期货交易系统
+#
+# 所有应用镜像必须由受验证的 release.env 显式提供，格式为 repository@sha256:digest。
+# 运行时秘密由 QIHUO_RUNTIME_ENV_FILE 指向的服务器本地文件提供。
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: qihuo-redis
+    # 纯内存模式：关闭 AOF/RDB 持久化，不落盘。
+    # 慢盘曾导致 fsync/bgsave 阻塞 redis → backend redis 连接断 → 崩溃 exit 128。
+    # redis 数据为行情缓存(可重建)，纯内存彻底隔离磁盘 I/O。
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "127.0.0.1:${QIHUO_REDIS_HOST_PORT:-6380}:6379"
+      # LAN 绑定（可选）：供其他机器的 sina-bridge 推流双写；
+      # 默认绑回环另一端口（无副作用），需要时设 QIHUO_REDIS_LAN_BIND=<本机 LAN IP>
+      - "${QIHUO_REDIS_LAN_BIND:-127.0.0.1}:${QIHUO_REDIS_LAN_PORT:-6381}:6379"
+    volumes:
+      - qihuo-redis-data:/data
+    restart: unless-stopped
+    networks:
+      - qihuo-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  backend:
+    image: "${QIHUO_BACKEND_IMAGE:?必须设置 QIHUO_BACKEND_IMAGE}"
+    container_name: qihuo-backend
+    ports:
+      - "${BACKEND_HOST_PORT:-8002}:8001"
+    env_file:
+      - "${QIHUO_RUNTIME_ENV_FILE:-.env}"
+    environment:
+      APP_ENV: production
+      POSTGRES_HOST: "${QIHUO_POSTGRES_HOST:-qihuo-postgres}"
+      POSTGRES_PORT: "${QIHUO_POSTGRES_PORT:-5432}"
+      POSTGRES_USER: "${QIHUO_POSTGRES_USER:-qihuo}"
+      POSTGRES_DB: "${QIHUO_POSTGRES_DB:-qihuo}"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      QDRANT_HOST: "${QIHUO_QDRANT_HOST:-qdrant}"
+      QDRANT_PORT: "${QIHUO_QDRANT_PORT:-6333}"
+      JWT_ACCESS_TOKEN_EXPIRE_MINUTES: "${QIHUO_JWT_ACCESS_MINUTES:-10080}"
+      JWT_REFRESH_TOKEN_EXPIRE_DAYS: "${QIHUO_JWT_REFRESH_DAYS:-7}"
+      # K 线/quote 兜底经 sina-bridge 容器（backend 不直连新浪）。
+      # 跨机部署时在运行时 .env 设 QIHUO_SINA_BRIDGE_BASE_URL=http://<桥宿主>:8110
+      SINA_BRIDGE_BASE_URL: "${QIHUO_SINA_BRIDGE_BASE_URL:-http://sina-bridge:8110}"
+    # always：redis 纯内存+retry 后理论上不崩，此为偶发兜底
+    restart: always
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - qihuo-net
+
+  frontend:
+    image: "${QIHUO_FRONTEND_IMAGE:?必须设置 QIHUO_FRONTEND_IMAGE}"
+    container_name: qihuo-frontend
+    ports:
+      - "${FRONTEND_HOST_PORT:-3000}:3000"
+    environment:
+      BACKEND_URL: http://qihuo-backend:8001
+      NEXT_PUBLIC_API_URL: ""
+      NEXT_PUBLIC_WS_URL: ""
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - qihuo-net
+
+  # 真实 CTP 行情桥（profile 门控：SimNow 已下线 2026-08-24，live 桥仅在
+  # 配置 REAL_CTP_* 凭据的服务器启用——运行时 .env 设 QIHUO_ENABLE_CTP_BRIDGE=1
+  # + QIHUO_CTP_BRIDGE_CHANNEL=real_ctp；未启用时容器不创建）。
+  ctp-bridge:
+    image: "${QIHUO_CTP_BRIDGE_IMAGE:?必须设置 QIHUO_CTP_BRIDGE_IMAGE}"
+    container_name: qihuo-ctp-bridge
+    env_file:
+      - "${QIHUO_RUNTIME_ENV_FILE:-.env}"
+    environment:
+      CTP_BRIDGE_MODE: live
+      CTP_BRIDGE_CHANNEL: "${QIHUO_CTP_BRIDGE_CHANNEL:-real_ctp}"
+      SIMNOW_FLOW_PATH: /tmp/qihuo_ctp_md_flow_live
+      REDIS_HOST: "${QIHUO_REDIS_HOST_HOSTNET:-127.0.0.1}"
+      REDIS_PORT: "${QIHUO_REDIS_HOST_PORT:-6380}"
+      REDIS_DB: "${QIHUO_REDIS_DB:-0}"
+    network_mode: host
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import os,redis,time;
+          r=redis.Redis(host=os.environ.get('REDIS_HOST','127.0.0.1'),port=int(os.environ.get('REDIS_PORT','6379')),db=int(os.environ.get('REDIS_DB','0')),decode_responses=True);
+          v=r.get('market:live:bridge:heartbeat');
+          assert v and (time.time()-float(v.split('|')[0]))<90
+      interval: 30s
+      timeout: 8s
+      retries: 3
+      start_period: 40s
+    profiles:
+      - ctp-md
+
+  # 新浪行情源桥 —— 新浪 HTTP（hq.sinajs.cn 行情 + K 线）的唯一出网点。
+  # 复用 backend 镜像 + 独立启动命令。
+  # 中心化部署（profile 门控）：启用 = 运行时 .env 设 QIHUO_ENABLE_SINA_BRIDGE=1，
+  # 可选 quote 源键/月度键/心跳双写远端副本（QIHUO_SINA_REPLICATE_REDIS_URL），
+  # 其他机器的 backend 经宿主端口 8110 取 K 线。
+  sina-bridge:
+    image: "${QIHUO_BACKEND_IMAGE:?必须设置 QIHUO_BACKEND_IMAGE}"
+    container_name: qihuo-sina-bridge
+    command: ["python", "-m", "app.connectors.sina.main"]
+    env_file:
+      - "${QIHUO_RUNTIME_ENV_FILE:-.env}"
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_DB: "${QIHUO_REDIS_DB:-0}"
+      SINA_REPLICATE_REDIS_URL: "${QIHUO_SINA_REPLICATE_REDIS_URL:-}"
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - qihuo-net
+    # 宿主端口：其他机器跨机取 K 线/quote 用
+    ports:
+      - "${QIHUO_SINA_BRIDGE_HOST_PORT:-8110}:8110"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          r=urllib.request.urlopen('http://127.0.0.1:8110/health', timeout=5);
+          assert r.status == 200
+      interval: 30s
+      timeout: 8s
+      retries: 3
+      start_period: 20s
+    profiles:
+      - sina-bridge
+
+  # VVTR 行情中继（profile 门控：仅持有 VVTR 密钥的服务器启用）。
+  # 复用 backend 镜像 + 独立启动命令。
+  vvtr-relay:
+    image: "${QIHUO_BACKEND_IMAGE:?必须设置 QIHUO_BACKEND_IMAGE}"
+    container_name: qihuo-vvtr-relay
+    command: ["python", "-m", "app.relay.main"]
+    # 默认复用运行时环境文件（VVTR_API_KEY/RELAY_TOKEN/RELAY_WS_VERSION 等
+    # 都写在那里）；如需拆分可用 QIHUO_RELAY_ENV_FILE 指定绝对路径。
+    env_file:
+      - "${QIHUO_RELAY_ENV_FILE:-${QIHUO_RUNTIME_ENV_FILE:-.env}}"
+    environment:
+      # 覆盖运行时文件中的 Redis 指向：走 compose 网络内的服务名
+      # （跨进程 1rps 节流锁与 backend 共用）
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_DB: "${QIHUO_REDIS_DB:-0}"
+    # 保持全网卡绑定：其他机器经 http://<本机>:8100 跨机访问
+    # （DB system_settings 指向该地址）。未鉴权暴露面由 RELAY_TOKEN 关闭。
+    ports:
+      - "${QIHUO_RELAY_HOST_PORT:-8100}:8100"
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - qihuo-net
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          r=urllib.request.urlopen('http://127.0.0.1:8100/health', timeout=5);
+          assert r.status == 200
+      interval: 30s
+      timeout: 8s
+      retries: 3
+      start_period: 20s
+    profiles:
+      - vvtr-relay
+
+  ctp-bridge-virtual:
+    image: "${QIHUO_CTP_BRIDGE_IMAGE:?必须设置 QIHUO_CTP_BRIDGE_IMAGE}"
+    container_name: qihuo-ctp-bridge-virtual
+    env_file:
+      - "${QIHUO_RUNTIME_ENV_FILE:-.env}"
+    environment:
+      CTP_BRIDGE_MODE: virtual
+      CTP_BRIDGE_CHANNEL: openctp_724
+      CTP_ALLOW_OFF_HOURS: "1"
+      SIMNOW_FLOW_PATH: /tmp/qihuo_ctp_md_flow_virtual
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_DB: "${QIHUO_REDIS_DB:-0}"
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - qihuo-net
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import os,redis,time;
+          r=redis.Redis(host=os.environ.get('REDIS_HOST','127.0.0.1'),port=int(os.environ.get('REDIS_PORT','6379')),db=int(os.environ.get('REDIS_DB','0')),decode_responses=True);
+          v=r.get('market:virtual:bridge:heartbeat');
+          assert v and (time.time()-float(v.split('|')[0]))<90
+      interval: 30s
+      timeout: 8s
+      retries: 3
+      start_period: 40s
+    profiles:
+      - virtual-md
+
+networks:
+  qihuo-net:
+    driver: bridge
+
+volumes:
+  qihuo-redis-data:

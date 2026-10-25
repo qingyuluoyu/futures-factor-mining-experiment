@@ -1,0 +1,52 @@
+CREATE TABLE stock_research_v2_jobs (
+    id UUID PRIMARY KEY,
+    owner_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    trading_mode VARCHAR(16) NOT NULL,
+    idempotency_key UUID NOT NULL,
+    request_hash VARCHAR(64) NOT NULL,
+    request_id VARCHAR(32) NOT NULL,
+    kind VARCHAR(24) NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    step VARCHAR(32) NOT NULL,
+    parameters JSONB NOT NULL,
+    method_version VARCHAR(64) NOT NULL,
+    workflow_version VARCHAR(64) NOT NULL,
+    max_runtime_seconds INTEGER NOT NULL,
+    max_queue_seconds INTEGER NOT NULL,
+    attempts INTEGER NOT NULL,
+    worker_token UUID,
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL,
+    queue_expires_at TIMESTAMPTZ NOT NULL,
+    started_at TIMESTAMPTZ,
+    finished_at TIMESTAMPTZ,
+    deadline_at TIMESTAMPTZ,
+    lease_expires_at TIMESTAMPTZ,
+    error_code VARCHAR(64),
+    result_dataset_id UUID REFERENCES stock_research_datasets(id) ON DELETE RESTRICT,
+    result_data_version VARCHAR(64),
+    result_qualification VARCHAR(24),
+    CONSTRAINT uq_stock_v2_job_key UNIQUE(owner_id,trading_mode,idempotency_key),
+    CONSTRAINT ck_stock_v2_job_mode CHECK (trading_mode IN ('virtual','live')),
+    CONSTRAINT ck_stock_v2_job_kind CHECK (kind = 'dataset'),
+    CONSTRAINT ck_stock_v2_job_status CHECK (status IN ('pending','running','completed','failed','cancelled','expired')),
+    CONSTRAINT ck_stock_v2_job_attempts CHECK (attempts BETWEEN 0 AND 1),
+    CONSTRAINT ck_stock_v2_job_runtime CHECK (max_runtime_seconds BETWEEN 30 AND 300),
+    CONSTRAINT ck_stock_v2_job_queue CHECK (max_queue_seconds BETWEEN 30 AND 900),
+    CONSTRAINT ck_stock_v2_job_identity CHECK (length(request_hash) = 64 AND length(request_id) = 32),
+    CONSTRAINT ck_stock_v2_job_result CHECK ((status = 'completed' AND result_dataset_id IS NOT NULL AND result_data_version IS NOT NULL AND result_qualification IS NOT NULL AND length(result_data_version) = 64 AND result_qualification = 'observation_only') OR (status <> 'completed' AND result_dataset_id IS NULL AND result_data_version IS NULL AND result_qualification IS NULL)),
+    CONSTRAINT ck_stock_v2_job_running CHECK (status <> 'running' OR (worker_token IS NOT NULL AND started_at IS NOT NULL AND deadline_at IS NOT NULL AND lease_expires_at IS NOT NULL)),
+    CONSTRAINT ck_stock_v2_job_finished CHECK ((status IN ('pending','running') AND finished_at IS NULL) OR (status IN ('completed','failed','cancelled','expired') AND finished_at IS NOT NULL))
+);
+CREATE INDEX ix_stock_v2_job_scope ON stock_research_v2_jobs(owner_id,trading_mode,created_at,id);
+CREATE INDEX ix_stock_v2_job_queue ON stock_research_v2_jobs(status,created_at,id);
+CREATE INDEX ix_stock_v2_job_lease ON stock_research_v2_jobs(status,lease_expires_at);
+CREATE TABLE stock_research_v2_workers (
+    name VARCHAR(64) PRIMARY KEY,
+    instance_id UUID NOT NULL,
+    token UUID NOT NULL,
+    heartbeat_at TIMESTAMPTZ NOT NULL,
+    lease_expires_at TIMESTAMPTZ NOT NULL,
+    busy_job_id UUID REFERENCES stock_research_v2_jobs(id) ON DELETE RESTRICT,
+    CONSTRAINT ck_stock_v2_worker_name CHECK (name = 'stock-v2-dataset-job-v1')
+);

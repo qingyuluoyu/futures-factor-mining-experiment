@@ -1,0 +1,4 @@
+# Optional stock-only CPU overlay. Never install into the futures environment.
+# Uses the existing locked NumPy/SciPy runtime, recorded in every model manifest.
+lightgbm==4.7.0 --hash=sha256:f42d1e5b32b6f170e606d7c689c6165671da98d7bf37f1addec2623efc8740c9
+narwhals==2.27.1 --hash=sha256:d057df13f5852b8e157596e82eb5e955fad267425df5e420e0ee9863da483b31

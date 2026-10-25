@@ -1,0 +1,54 @@
+﻿国家/地区,品牌,类别,文件名,源图标
+美国,OpenAI ChatGPT,模型/助手,01_OpenAI ChatGPT.png,openai.png
+美国,Anthropic Claude,模型/助手,02_Anthropic Claude.png,claude-color.png
+美国,Google Gemini,模型/助手,03_Google Gemini.png,gemini-color.png
+美国,Microsoft Copilot,AI 助手,04_Microsoft Copilot.png,copilot-color.png
+美国,Meta AI,模型/助手,05_Meta AI.png,metaai-color.png
+美国,xAI Grok,模型/助手,06_xAI Grok.png,grok.png
+美国,Perplexity,AI 搜索/助手,07_Perplexity.png,perplexity-color.png
+美国,Amazon Bedrock,模型平台,08_Amazon Bedrock.png,bedrock-color.png
+美国,Google AI Studio,模型平台,09_Google AI Studio.png,aistudio.png
+美国,Google Vertex AI,模型平台,10_Google Vertex AI.png,vertexai-color.png
+美国,Microsoft Azure AI,模型平台,11_Microsoft Azure AI.png,azureai-color.png
+美国,OpenRouter,聚合渠道,12_OpenRouter.png,openrouter.png
+美国,Together AI,推理渠道,13_Together AI.png,together-color.png
+美国,Fireworks AI,推理渠道,14_Fireworks AI.png,fireworks-color.png
+美国,Groq,推理渠道,15_Groq.png,groq.png
+美国,DeepInfra,推理渠道,16_DeepInfra.png,deepinfra-color.png
+美国,Replicate,模型平台,17_Replicate.png,replicate.png
+美国,Hugging Face,模型平台,18_Hugging Face.png,huggingface-color.png
+美国,NVIDIA AI,模型平台,19_NVIDIA AI.png,nvidia-color.png
+美国,Cloudflare Workers AI,推理渠道,20_Cloudflare Workers AI.png,workersai-color.png
+美国,Cerebras,推理渠道,21_Cerebras.png,cerebras-color.png
+美国,Poe,聚合助手,22_Poe.png,poe-color.png
+美国,Replit AI,AI 编程,23_Replit AI.png,replit-color.png
+中国,DeepSeek,模型/助手,01_DeepSeek.png,deepseek-color.png
+中国,阿里通义千问 Qwen,模型/助手,02_阿里通义千问 Qwen.png,qwen-color.png
+中国,阿里云百炼 Bailian,模型平台,03_阿里云百炼 Bailian.png,bailian-color.png
+中国,字节豆包 Doubao,模型/助手,04_字节豆包 Doubao.png,doubao-color.png
+中国,火山引擎 Volcengine,模型平台,05_火山引擎 Volcengine.png,volcengine-color.png
+中国,腾讯混元 Hunyuan,模型,06_腾讯混元 Hunyuan.png,hunyuan-color.png
+中国,腾讯元宝 Yuanbao,AI 助手,07_腾讯元宝 Yuanbao.png,yuanbao-color.png
+中国,Kimi,模型/助手,08_Kimi.png,kimi-color.png
+中国,月之暗面 Moonshot AI,模型厂商,09_月之暗面 Moonshot AI.png,moonshot.png
+中国,智谱 AI Zhipu,模型厂商,10_智谱 AI Zhipu.png,zhipu-color.png
+中国,智谱清言 Qingyan,AI 助手,11_智谱清言 Qingyan.png,qingyan-color.png
+中国,百度文心 Wenxin,模型/助手,12_百度文心 Wenxin.png,wenxin-color.png
+中国,百度智能云,模型平台,13_百度智能云.png,baiducloud-color.png
+中国,MiniMax,模型/助手,14_MiniMax.png,minimax-color.png
+中国,百川智能 Baichuan,模型厂商,15_百川智能 Baichuan.png,baichuan-color.png
+中国,阶跃星辰 StepFun,模型厂商,16_阶跃星辰 StepFun.png,stepfun-color.png
+中国,零一万物 Yi,模型,17_零一万物 Yi.png,yi-color.png
+中国,零一万物 01.AI,模型厂商,18_零一万物 01.AI.png,zeroone.png
+中国,华为云 AI,模型平台,19_华为云 AI.png,huaweicloud-color.png
+中国,讯飞星火 Spark,模型/助手,20_讯飞星火 Spark.png,spark-color.png
+中国,讯飞开放平台,模型平台,21_讯飞开放平台.png,iflytekcloud-color.png
+中国,商汤日日新 SenseNova,模型平台,22_商汤日日新 SenseNova.png,sensenova-color.png
+中国,昆仑万维天工 Skywork,模型/助手,23_昆仑万维天工 Skywork.png,skywork-color.png
+中国,硅基流动 SiliconCloud,推理渠道,24_硅基流动 SiliconCloud.png,siliconcloud-color.png
+中国,魔搭 ModelScope,模型平台,25_魔搭 ModelScope.png,modelscope-color.png
+中国,扣子 Coze,智能体平台,26_扣子 Coze.png,coze.png
+中国,360 智脑,模型/助手,27_360 智脑.png,ai360-color.png
+中国,PPIO 派欧云,推理渠道,28_PPIO 派欧云.png,ppio-color.png
+中国,Gitee AI,模型平台,29_Gitee AI.png,giteeai.png
+中国,美团 LongCat,模型,30_美团 LongCat.png,longcat-color.png

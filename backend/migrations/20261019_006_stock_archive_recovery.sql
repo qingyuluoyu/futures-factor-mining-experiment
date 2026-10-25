@@ -1,0 +1,32 @@
+CREATE TABLE stock_archive_recoveries (
+    id UUID PRIMARY KEY,
+    source_job_id UUID NOT NULL,
+    source_batch_id UUID NOT NULL,
+    source_data_version CHAR(64) NOT NULL,
+    method_version VARCHAR(64) NOT NULL,
+    operator_id UUID NOT NULL,
+    idempotency_key UUID NOT NULL,
+    request_hash CHAR(64) NOT NULL,
+    request_id VARCHAR(32) NOT NULL,
+    reason VARCHAR(160) NOT NULL,
+    attempt_number INTEGER NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    step VARCHAR(32) NOT NULL,
+    started_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL,
+    deadline_at TIMESTAMPTZ NOT NULL,
+    finished_at TIMESTAMPTZ,
+    archive_batch_id UUID,
+    error_code VARCHAR(64),
+    error_message VARCHAR(300),
+    CONSTRAINT uq_stock_archive_recovery_operator_key UNIQUE (operator_id, idempotency_key),
+    CONSTRAINT uq_stock_archive_recovery_source_attempt UNIQUE (source_job_id, attempt_number),
+    CONSTRAINT ck_stock_archive_recovery_status CHECK (status = 'running' OR status = 'completed' OR status = 'failed' OR status = 'cancelled'),
+    CONSTRAINT ck_stock_archive_recovery_step CHECK ((status = 'running' AND step = 'recovering') OR (status = 'completed' AND step = 'completed') OR (status = 'failed' AND step = 'failed') OR (status = 'cancelled' AND step = 'cancelled')),
+    CONSTRAINT ck_stock_archive_recovery_attempt CHECK (attempt_number >= 1 AND attempt_number <= 2),
+    CONSTRAINT ck_stock_archive_recovery_times CHECK (deadline_at > started_at AND updated_at >= started_at),
+    CONSTRAINT ck_stock_archive_recovery_finished CHECK (finished_at IS NULL OR finished_at >= started_at),
+    CONSTRAINT ck_stock_archive_recovery_result CHECK ((status = 'running' AND finished_at IS NULL AND archive_batch_id IS NULL AND error_code IS NULL AND error_message IS NULL) OR (status = 'completed' AND finished_at IS NOT NULL AND archive_batch_id IS NOT NULL AND error_code IS NULL AND error_message IS NULL) OR ((status = 'failed' OR status = 'cancelled') AND finished_at IS NOT NULL AND archive_batch_id IS NULL AND error_code IS NOT NULL))
+);
+CREATE INDEX ix_stock_archive_recovery_source_started ON stock_archive_recoveries (source_job_id, started_at);
+CREATE INDEX ix_stock_archive_recovery_status_deadline ON stock_archive_recoveries (status, deadline_at);

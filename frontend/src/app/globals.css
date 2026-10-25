@@ -1,0 +1,344 @@
+@import "tailwindcss" source("../");
+
+/* 类切换暗色：<html class="dark">（Tailwind v4 自定义变体） */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* 重置 Tailwind v4 全局默认 transition（防止数据更新闪烁） */
+*, *::before, *::after {
+  transition-property: none;
+}
+
+/* ========== 浅色主题（默认，白底）========== */
+:root {
+  /* 背景色 */
+  --bg-primary: #f3f5f8;
+  --bg-secondary: #ffffff;
+  --bg-tertiary: #e9edf2;
+
+  /* 边框色 */
+  --border: #dde2e9;
+
+  /* 文字色 */
+  --text-primary: #171a1f;
+  --text-secondary: #5a6270;
+  --text-muted: #98a0ad;
+
+  /* 强调色 - 涨跌 */
+  --accent-up: #ef4444;
+  --accent-down: #22c55e;
+  --accent-info: #00b894;
+  --accent-warn: #d97706;
+  --accent-danger: #dc2626;
+
+  /* shadcn/ui 兼容变量 */
+  --background: var(--bg-primary);
+  --foreground: var(--text-primary);
+  --card: var(--bg-secondary);
+  --card-foreground: var(--text-primary);
+  --popover: var(--bg-secondary);
+  --popover-foreground: var(--text-primary);
+  --primary: #2563eb;
+  --primary-foreground: #ffffff;
+  --secondary: var(--bg-tertiary);
+  --secondary-foreground: var(--text-primary);
+  --muted: var(--bg-tertiary);
+  --muted-foreground: var(--text-secondary);
+  --destructive: var(--accent-danger);
+  --destructive-foreground: #ffffff;
+  --accent: var(--bg-tertiary);
+  --accent-foreground: var(--text-primary);
+  --input: var(--border);
+  --ring: #2563eb;
+  --radius: 0.375rem;
+
+  /* 侧边栏 */
+  --sidebar-width: 192px;
+  --sidebar-collapsed-width: 48px;
+  --nav-height: 56px;
+
+  /* 字体 */
+  --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Code", "Fira Code", monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", "Helvetica Neue", Helvetica, Arial, sans-serif;
+
+  /* 界面字号缩放（个人中心·显示设置） */
+  --app-font-size: 16px;
+
+  /* 图表主题（lightweight-charts 等 JS 图表读取） */
+  --chart-bg: #ffffff;
+  --chart-text: #5a6270;
+  --chart-grid: #e9edf2;
+  --chart-border: #dde2e9;
+  --chart-crosshair: #98a0ad;
+  --chart-grid-soft: rgba(23, 26, 31, 0.06);
+  --chart-crosshair-soft: rgba(90, 98, 112, 0.35);
+  --chart-tooltip-bg: rgba(23, 26, 31, 0.92);
+
+  /* 首页背景 */
+  --landing-bg: #ffffff;
+  --landing-grid-line: rgba(239, 68, 68, 0.06);
+  --landing-dot: rgba(23, 26, 31, 0.1);
+}
+
+/* ========== 深色主题（暖灰色板）========== */
+.dark {
+  --bg-primary: #1a1a1e;
+  --bg-secondary: #242428;
+  --bg-tertiary: #2e2e33;
+
+  --border: #3a3a40;
+
+  --text-primary: #e8e8ec;
+  --text-secondary: #9ca3af;
+  --text-muted: #6b7280;
+
+  --accent-up: #ef4444;
+  --accent-down: #22c55e;
+  --accent-info: #00d4aa;
+  --accent-warn: #f5a623;
+  --accent-danger: #dc2626;
+
+  --primary: #3b82f6;
+  --ring: #3b82f6;
+
+  --chart-bg: #1a1a1e;
+  --chart-text: #9ca3af;
+  --chart-grid: #2e2e33;
+  --chart-border: #3a3a40;
+  --chart-crosshair: #6b7280;
+  --chart-grid-soft: rgba(255, 255, 255, 0.05);
+  --chart-crosshair-soft: rgba(148, 163, 184, 0.35);
+  --chart-tooltip-bg: rgba(30, 41, 59, 0.95);
+
+  --landing-bg: #0a0a0c;
+  --landing-grid-line: rgba(239, 68, 68, 0.07);
+  --landing-dot: rgba(255, 255, 255, 0.12);
+}
+
+/* 全局基础样式 */
+html {
+  color-scheme: light;
+  font-size: var(--app-font-size);
+}
+
+html.dark {
+  color-scheme: dark;
+}
+
+/* 字号档位：通过 data-font-size 切换，rem 类名整体放大 */
+html[data-font-size="standard"] {
+  --app-font-size: 16px;
+}
+html[data-font-size="large"] {
+  --app-font-size: 18px;
+}
+html[data-font-size="xlarge"] {
+  --app-font-size: 20px;
+}
+html[data-font-size="xxlarge"] {
+  --app-font-size: 22px;
+}
+
+body {
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 1rem;
+}
+
+/* 数字等宽字体工具类 */
+.font-num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 涨跌颜色工具类 */
+.text-up {
+  color: var(--accent-up);
+}
+
+.text-down {
+  color: var(--accent-down);
+}
+
+.text-flat {
+  color: var(--text-muted);
+}
+
+.bg-up {
+  background-color: var(--accent-up);
+}
+
+.bg-down {
+  background-color: var(--accent-down);
+}
+
+/* 价格闪烁动画 */
+@keyframes flash-up {
+  0% { background-color: transparent; }
+  40% { background-color: rgba(239, 68, 68, 0.3); }
+  100% { background-color: transparent; }
+}
+
+@keyframes flash-down {
+  0% { background-color: transparent; }
+  40% { background-color: rgba(34, 197, 94, 0.3); }
+  100% { background-color: transparent; }
+}
+
+.flash-up {
+  animation: flash-up 0.8s ease-out;
+}
+
+.flash-down {
+  animation: flash-down 0.8s ease-out;
+}
+
+/* 新记录淡入动画 */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* 新闻条水平滚动动画 */
+@keyframes news-ticker {
+  0% { transform: translateX(100%); }
+  100% { transform: translateX(-100%); }
+}
+
+.animate-news-ticker {
+  display: inline-block;
+  animation: news-ticker linear infinite;
+}
+
+/* 风控闪烁 */
+@keyframes risk-flash {
+  0%, 100% { border-color: var(--accent-danger); }
+  50% { border-color: transparent; }
+}
+
+.risk-flash {
+  animation: risk-flash 1s ease-in-out infinite;
+}
+
+/* 滚动条样式 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-primary);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+/* ========== 首页科技网格背景 ========== */
+.landing-grid {
+  background-image:
+    linear-gradient(var(--landing-grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--landing-grid-line) 1px, transparent 1px);
+  background-size: 48px 48px;
+  animation: landing-grid-drift 28s linear infinite;
+  mask-image: radial-gradient(ellipse 70% 60% at 50% 40%, #000 20%, transparent 75%);
+}
+
+.landing-dots {
+  background-image: radial-gradient(
+    var(--landing-dot) 0.6px,
+    transparent 0.6px
+  );
+  background-size: 20px 20px;
+  animation: landing-dots-pulse 6s ease-in-out infinite;
+}
+
+.landing-scan {
+  top: -6rem;
+  background: linear-gradient(
+    180deg,
+    transparent 0%,
+    rgba(239, 68, 68, 0.08) 45%,
+    rgba(239, 68, 68, 0.02) 55%,
+    transparent 100%
+  );
+  animation: landing-scan-move 9s ease-in-out infinite;
+}
+
+@keyframes landing-grid-drift {
+  0% {
+    background-position: 0 0, 0 0;
+  }
+  100% {
+    background-position: 48px 48px, 48px 48px;
+  }
+}
+
+@keyframes landing-dots-pulse {
+  0%,
+  100% {
+    opacity: 0.28;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+@keyframes landing-scan-move {
+  0% {
+    transform: translateY(0);
+    opacity: 0;
+  }
+  12% {
+    opacity: 0.45;
+  }
+  50% {
+    transform: translateY(70vh);
+    opacity: 0.35;
+  }
+  88% {
+    opacity: 0.15;
+  }
+  100% {
+    transform: translateY(100vh);
+    opacity: 0;
+  }
+}
+
+/* 首页允许部分 transition（全局默认关闭） */
+.landing-grid,
+.landing-dots,
+.landing-scan {
+  will-change: transform, opacity, background-position;
+}
+
+/* 首页展示条：隐藏滚动条 */
+.landing-showcase-track {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.landing-showcase-track::-webkit-scrollbar {
+  display: none;
+}
+
+/* 轮播进度条 */
+@keyframes landing-carousel-progress {
+  from {
+    width: 0%;
+  }
+  to {
+    width: 100%;
+  }
+}
+.landing-carousel-progress {
+  width: 0%;
+  animation-name: landing-carousel-progress;
+  animation-timing-function: linear;
+  animation-fill-mode: forwards;
+}

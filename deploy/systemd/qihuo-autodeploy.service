@@ -1,0 +1,13 @@
+[Unit]
+Description=qihuo 33 test environment immutable auto deployment
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/lib/qihuo-deploy/auto-deploy-33.sh
+Environment=QIHUO_SECRETS_FILE=%h/.config/qihuo-deploy/secrets.env
+Environment=QIHUO_DEPLOY_ROOT=%h/.local/share/qihuo-deploy
+Nice=10
+IOSchedulingClass=best-effort
+NoNewPrivileges=true

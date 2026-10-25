@@ -1,0 +1,47 @@
+[project]
+name = "qihuo-backend"
+version = "0.8.0"
+description = "期货交易系统 - 后端服务"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.34.0",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "asyncpg>=0.30.0",
+    "redis>=5.2.0",
+    "pydantic-settings>=2.7.0",
+    "httpx>=0.27.0",
+    "websockets>=12.0",
+    "python-jose>=3.5.0",
+    "passlib[bcrypt]>=1.7.4",
+    "bcrypt>=4.0.0,<4.1.0",
+    "apscheduler>=3.10.0",
+    "cryptography>=48.0.0",
+    "qdrant-client>=1.18.0",
+    "python-multipart>=0.0.30",
+    "akshare>=1.14.0",
+    "aiodocker>=0.23.0",
+    "tqsdk>=3.7.0",
+    "edge-tts>=7.2.8",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# CTP 行情桥依赖不进主依赖：在 bridge 环境按需
+#   uv pip install openctp-ctp
+# 见 discuss/2026-07-24-market-channel-simnow.md
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.4.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

@@ -1,0 +1,41 @@
+{
+  "cases": {
+    "daily_trend": {
+      "bars": 1200,
+      "champions": 9,
+      "wf_pass": 9,
+      "wf_pass_rate": 1.0,
+      "train_ann_median": 0.8904,
+      "test_ann_median": 1.1276,
+      "is_oos_gap": -0.2372,
+      "wall_sec": 4.32
+    },
+    "daily_choppy": {
+      "bars": 1200,
+      "champions": 8,
+      "wf_pass": 8,
+      "wf_pass_rate": 1.0,
+      "train_ann_median": 0.178,
+      "test_ann_median": 0.1689,
+      "is_oos_gap": 0.0091,
+      "wall_sec": 2.86
+    },
+    "min5_recent": {
+      "bars": 3000,
+      "champions": 5,
+      "wf_pass": 5,
+      "wf_pass_rate": 1.0,
+      "train_ann_median": 1.5463,
+      "test_ann_median": 0.5715,
+      "is_oos_gap": 0.9748,
+      "wall_sec": 4.92
+    }
+  },
+  "config": {
+    "population": 30,
+    "generations": 8,
+    "train_ratio": 0.7,
+    "walk_forward_folds": 3,
+    "cost": 0.0005
+  }
+}
