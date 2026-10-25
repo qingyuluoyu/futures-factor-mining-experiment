@@ -72,7 +72,14 @@ async def availability(request: Request, queue=Depends(service)):
     async def inspect():
         enabled = getattr(request.app.state, "stock_v2_jobs_enabled", False) is True
         accepting = enabled and await queue.available()
-        return {"accepting": accepting, "research_enabled": False, "reason": "仅固定观察归档；不能运行因子回测" if accepting else "新任务未开放、未迁移或无有效执行器；既有任务可查询和取消"}
+        # ``research_enabled`` stays pinned to False by contract: the research routes
+        # now accept submissions, but only the benchmark kernel has a real
+        # implementation, so no factor IC / backtest / training / report run is
+        # actually available yet.  Saying so here is honest; widening the literal
+        # would tell clients a capability that still refuses at the kernel.
+        reason = ("固定观察归档任务已开放；研究类型入口已接通，但因子IC/回测/训练/报告内核尚未接线，提交后会以明确错误码失败"
+            if accepting else "新任务未开放、未迁移或无有效执行器；既有任务可查询和取消")
+        return {"accepting": accepting, "research_enabled": False, "reason": reason}
     return await execute(request, queue, "availability", inspect, DatasetJobAvailability)
 
 
