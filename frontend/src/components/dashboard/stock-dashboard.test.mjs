@@ -7,6 +7,7 @@ import ts from "typescript"
 
 const filename = new URL("./stock-dashboard.tsx", import.meta.url)
 const requireModule = createRequire(import.meta.url)
+const marketNavigation = await import("../../lib/stock-market-navigation.ts")
 const EodStatus = () => null
 const boards = {
   as_of: "2026-10-16", previous_date: "2026-10-15", source: "teajoin_eod", price_adjustment: "none", has_more: false,
@@ -32,12 +33,24 @@ function mount({ response = boards, error = null, deferred = null } = {}) {
     "@/components/market/stock-quote-detail": { StockQuoteDetail: Detail },
     "@/components/market/stock-eod-status": { StockEodStatus: EodStatus },
     "next/link": { default: "a" },
+    "@/lib/stock-market-navigation": marketNavigation,
     "@/lib/utils": { cn: (...values) => values.filter(Boolean).join(" ") },
   }
   const module = { exports: {} }
+  // The shared market overview runs in the same context against the same stubbed reads, so a
+  // page-level assertion about "one board read and one EOD read" observes the real component.
+  const overviewModule = { exports: {} }
+  vm.runInNewContext(ts.transpileModule(readFileSync(new URL("../market/stock-market-overview.tsx", import.meta.url), "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText, { module: overviewModule, exports: overviewModule.exports, AbortController, Error, require: (name) => dependencies[name] ?? requireModule(name) })
+  const Overview = overviewModule.exports.StockMarketOverview
+  dependencies["@/components/market/stock-market-overview"] = overviewModule.exports
   vm.runInNewContext(output, { module, exports: module.exports, AbortController, Error, require: (name) => dependencies[name] ?? requireModule(name) })
-  const render = () => { cursor = 0; return module.exports.StockDashboard() }
-  return { render, calls, controls, Members, Detail, async settle() { while (effects.length) effects.shift()(); await new Promise(setImmediate) }, unmount() { slots.forEach((slot) => slot?.cleanup?.()) } }
+  function draw(node) {
+    if (Array.isArray(node)) return node.flatMap(draw)
+    if (!node || typeof node !== "object") return node
+    return node.type === Overview ? draw(node.type(node.props)) : node
+  }
+  const render = () => { cursor = 0; return draw(module.exports.StockDashboard()) }
+  return { render, calls, controls, Members, Detail, Overview, async settle() { while (effects.length) effects.shift()(); await new Promise(setImmediate) }, unmount() { slots.forEach((slot) => slot?.cleanup?.()) } }
 }
 
 test("dashboard exposes independent EOD status and shares the existing refresh revision", async () => {
@@ -46,6 +59,14 @@ test("dashboard exposes independent EOD status and shares the existing refresh r
   await page.settle()
   elements(page.render()).find((item) => item.type === "button" && text(item) === "刷新看板").props.onClick()
   assert.equal(elements(page.render()).find((item) => item.type === EodStatus)?.props.refreshKey, 1)
+})
+
+test("the stock dashboard reads the board directory and the EOD status exactly once", async () => {
+  const page = mount(); page.render(); await page.settle()
+  assert.equal(page.calls.length, 1)
+  assert.equal(page.calls[0].keyword, "")
+  assert.equal(elements(page.render()).filter((item) => item.type === EodStatus).length, 1)
+  assert.doesNotMatch(readFileSync(filename, "utf8"), /getStockBoardsApi|getStockEodStatusApi|getStockMembersApi/)
 })
 
 test("stock dashboard replaces the replay form and preserves the futures dashboard branch", () => {
@@ -61,16 +82,10 @@ test("dashboard displays actual coverage and sample breadth with actionable indu
   assert.match(text(tree), /5000/); assert.match(text(tree), /200/); assert.match(text(tree), /2026-10-16/)
   assert.match(text(tree), /可比样本/); assert.match(text(tree), /不复权/)
   assert.match(text(tree), /涨\s*10/); assert.match(text(tree), /跌\s*3/); assert.match(text(tree), /平\s*2/)
-  elements(tree).find((item) => item.type === "button" && text(item).includes("银行")).props.onClick()
-  tree = page.render()
-  const members = elements(tree).find((item) => item.type === page.Members)
-  assert.equal(members.props.industry, "银行")
-  members.props.onSelect("600001")
-  tree = page.render()
-  const detail = elements(tree).find((item) => item.type === page.Detail)
-  assert.equal(detail.props.code, "600001")
-  detail.props.onBack()
-  assert.ok(elements(page.render()).find((item) => item.type === page.Members))
+  const industry = elements(tree).find((item) => item.type === "a" && text(item).includes("银行"))
+  assert.ok(industry)
+  assert.equal(new URL(industry.props.href, "https://stock.invalid").searchParams.get("industry"), "银行")
+  assert.equal(elements(tree).some((item) => item.type === page.Members || item.type === page.Detail), false)
   assert.equal(page.calls.length, 1)
 })
 
@@ -121,27 +136,39 @@ test("legacy qfq dashboard does not fabricate missing provenance counts", async 
   const page = mount({ response: { ...boards, source: "本地授权导入库", price_adjustment: "qfq" } }); page.render(); await page.settle()
   assert.match(text(page.render()), /本地授权导入库/)
   assert.match(text(page.render()), /前复权/)
-  assert.doesNotMatch(text(page.render()), /来源行数|目录未匹配\s*0|缺行情\s*0|采集时间|版本/)
+  const provenance = elements(page.render()).filter((item) => ["市场覆盖", "盘后行情来源与缺口"].includes(item.props?.["aria-label"]))
+  assert.equal(provenance.length, 2)
+  assert.doesNotMatch(provenance.map(text).join(""), /来源行数|目录未匹配\s*0|缺行情\s*0|采集时间|版本/)
 })
 
-test("opening a stock keeps the original query workspace mounted but hidden and inert", async () => {
+test("dashboard offers distinct course and market entries instead of mounting another stock browser or detail", async () => {
   const page = mount(); page.render(); await page.settle()
-  const before = elements(page.render()).find((item) => item.type === page.Members)
-  before.props.onSelect("000001")
-  const tree = page.render()
-  const retained = elements(tree).find((item) => item.type === page.Members)
-  assert.ok(retained)
-  assert.equal(retained.key, before.key)
-  assert.ok(elements(tree).find((item) => item.props?.hidden === true && item.props?.inert === true))
-  elements(tree).find((item) => item.type === page.Detail).props.onBack()
-  assert.equal(elements(page.render()).find((item) => item.type === page.Members).key, before.key)
+  const tree = page.render(), items = elements(tree)
+  assert.equal(items.some((item) => item.type === page.Members || item.type === page.Detail), false)
+  for (const href of ["/market", "/market/screener", "/factor-lab", "/factor-research", "/backtest", "/trading", "/history"]) {
+    assert.ok(items.some((item) => item.type === "a" && item.props.href === href), href)
+  }
+  assert.equal(items.some((item) => item.type === "table"), false)
+  assert.equal(page.calls.length, 1)
 })
 
-test("refresh updates member data without resetting its query component identity", async () => {
+test("refresh updates real summary statistics without starting a member or quote workspace", async () => {
   const page = mount(); page.render(); await page.settle()
-  const before = elements(page.render()).find((item) => item.type === page.Members)
+  page.controls.response = { ...boards, boards: [{ ...boards.boards[0], advancing: 9, declining: 4 }] }
   elements(page.render()).find((item) => item.type === "button" && text(item) === "刷新看板").props.onClick()
-  const after = elements(page.render()).find((item) => item.type === page.Members)
-  assert.equal(after.key, before.key)
-  assert.equal(after.props.refreshKey, 1)
+  page.render(); await page.settle()
+  const tree = page.render()
+  assert.match(text(tree), /涨\s*9/)
+  assert.match(text(tree), /跌\s*4/)
+  assert.equal(elements(tree).some((item) => item.type === page.Members || item.type === page.Detail), false)
+  assert.equal(page.calls.length, 2)
+})
+
+test("dashboard puts its summary before expanded data operations instead of duplicating large market panels", async () => {
+  const page = mount(); page.render(); await page.settle()
+  const tree = page.render()
+  assert.ok(elements(tree).some((item) => item.props?.["aria-label"] === "行情简要上下文"))
+  const disclosure = elements(tree).find((item) => item.props?.["aria-label"] === "行情数据与同步详情")
+  assert.ok(disclosure); assert.notEqual(disclosure.props.open, true)
+  assert.ok(elements(disclosure).some((item) => item.props?.["aria-label"] === "市场覆盖"))
 })

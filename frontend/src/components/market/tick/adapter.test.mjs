@@ -90,3 +90,88 @@ test("sparse daily bars have bounded candle widths and all indicator grids stay 
     assert.doesNotMatch(chart.renderToSVGString(), /NaN|undefined/)
   } finally { chart.dispose() }
 })
+
+async function indicatorOption(input) {
+  const colors = { text: "#555", grid: "#eee", border: "#aaa", crosshair: "#888", crosshairLabelBg: "#eee", tooltipBg: "#fff", tooltipText: "#333", infoBarBg: "#fff" }
+  const renderer = loadTsx(readFileSync(new URL("./echarts-candlestick.tsx", import.meta.url), "utf8"), {
+    "./adapter": await adapter(),
+    "./theme": { chartTheme: () => colors, getTheme: () => "light", useTheme: () => "light", stockCandleColors: () => ({ bull: "#C74040", bear: "#2D9B65", bullAlpha: "#C74040", bearAlpha: "#2D9B65" }) },
+  })
+  const dates = input.map((row) => row.date)
+  return { renderer, option: renderer.buildTickOption(input, dates, new Map(dates.map((day, index) => [day, index])), undefined, undefined, undefined,
+    true, false, ["vol", "macd", "rsi", "kdj", "boll"], 800, input.length - 1, undefined, { enabled: true, days: 2 }, undefined) }
+}
+const fixedBars = (count) => Array.from({ length: count }, (_, index) => ({ time: new Date(Date.UTC(2026, 0, index + 1)).toISOString().slice(0, 10), open: 10 + index, high: 11 + index, low: 9 + index, close: 10 + index, volume: (index + 1) / 100 }))
+const near = (actual, expected) => assert.ok(Math.abs(actual - expected) < 1e-9, `${actual} != ${expected}`)
+
+test("indicator directory names exactly the existing tick overlays and subcharts", async () => {
+  const { STOCK_CHART_INDICATORS } = await import("../stock-chart-indicators.ts")
+  const { renderer } = await indicatorOption([])
+  assert.deepEqual(Array.from(renderer.SUB_CHARTS, (item) => item.key), ["vol", "macd", "rsi", "kdj"])
+  assert.deepEqual(Array.from(renderer.OVERLAY_INDICATORS, (item) => item.key), ["boll"])
+  assert.deepEqual(STOCK_CHART_INDICATORS.map((item) => item.id).sort(), ["ma", ...Array.from(renderer.SUB_CHARTS, (item) => item.key), ...Array.from(renderer.OVERLAY_INDICATORS, (item) => item.key)].sort())
+})
+
+test("fixed vector exposes every current adapter indicator field and keeps first-price MACD zero distinct from null", async () => {
+  const { toTickChartData } = await adapter()
+  const input = fixedBars(70)
+  const data = toTickChartData(input, "adjacent_loaded_adjusted_close")
+  const last = data.at(-1)
+  for (const [field, expected] of Object.entries({ ma5: 77, ma10: 74.5, ma20: 69.5, ma60: 49.5, rsi_6: 100, rsi_14: 100, rsi_24: 100, kdj_k: 90, kdj_d: 90, kdj_j: 90,
+    boll_upper: 69.5 + 2 * Math.sqrt(35), boll_lower: 69.5 - 2 * Math.sqrt(35), volume: 0.7 })) near(last[field], expected)
+  near(data[1].macd_dif, 28 / 351); near(data[1].macd_dea, 28 / 1755); near(data[1].macd_hist, 224 / 1755)
+  assert.deepEqual([data[0].macd_dif, data[0].macd_dea, data[0].macd_hist], [0, 0, 0])
+  for (const [field, required] of Object.entries({ ma5: 5, ma10: 10, ma20: 20, ma60: 60, rsi_6: 7, rsi_14: 15, rsi_24: 25, kdj_k: 9, kdj_d: 9, kdj_j: 9, boll_upper: 20, boll_lower: 20 })) {
+    assert.ok(data.slice(0, required - 1).every((row) => row[field] === null), field)
+    assert.equal(typeof data[required - 1][field], "number", field)
+  }
+  assert.deepEqual(toTickChartData(input.slice(0, 30), "adjacent_loaded_adjusted_close"), data.slice(0, 30), "future bars cannot rewrite a prefix")
+  assert.equal(toTickChartData([{ ...input[0], volume: null }], "unavailable").length, 0)
+})
+
+test("all existing MA BOLL VOL MACD RSI KDJ series reach real ECharts SVG with exact field values", async () => {
+  const { toTickChartData } = await adapter()
+  const data = toTickChartData(fixedBars(70), "unavailable")
+  const { option } = await indicatorOption(data)
+  const byName = new Map(option.series.map((item) => [item.name, item]))
+  const fields = { MA5: "ma5", MA10: "ma10", MA20: "ma20", MA60: "ma60", "BOLL上": "boll_upper", "BOLL下": "boll_lower", DIF: "macd_dif", DEA: "macd_dea", MACD: "macd_hist", RSI6: "rsi_6", RSI14: "rsi_14", RSI24: "rsi_24", K: "kdj_k", D: "kdj_d", J: "kdj_j" }
+  for (const [name, field] of Object.entries(fields)) {
+    const series = option.series.find((item) => item.name === name && item.type !== "candlestick")
+    assert.ok(series, name)
+    assert.deepEqual(Array.from(series.data, (item) => typeof item === "object" && item !== null ? item.value : item), data.map((row) => row[field] ?? "-"), name)
+  }
+  near(byName.get("VOL5").data.at(-1), 0.68)
+  near(byName.get("VOL10").data.at(-1), 0.655)
+  assert.deepEqual(Array.from(byName.get("成交量").data, (item) => item.value), data.map((row) => row.volume))
+  const chart = requireModule("echarts").init(null, undefined, { renderer: "svg", ssr: true, width: 1200, height: 800 })
+  try {
+    chart.setOption({ ...option, animation: false, dataZoom: [] })
+    assert.equal(chart.getModel().getSeries().length, 19)
+    assert.ok(chart.getModel().getSeries().every((series) => series.getData().count() === 70))
+    const svg = chart.renderToSVGString()
+    assert.match(svg, /^<svg/); assert.match(svg, /<path/)
+    assert.doesNotMatch(svg, /NaN|undefined|Infinity/)
+  } finally { chart.dispose() }
+})
+
+test("sparse flat-price and zero-volume vectors render gaps without manufacturing unavailable curves or ratios", async () => {
+  const { toTickChartData } = await adapter()
+  const flat = fixedBars(25).map((row) => ({ ...row, open: 10, high: 10, low: 10, close: 10, volume: 0 }))
+  const data = toTickChartData(flat, "unavailable")
+  assert.ok(data.every((row) => row.kdj_k === null && row.kdj_d === null && row.kdj_j === null))
+  assert.equal(data.at(-1).rsi_24, 50)
+  assert.equal(data.at(-1).boll_upper, 10); assert.equal(data.at(-1).boll_lower, 10)
+  for (const input of [data.slice(0, 1), data]) {
+    const { option } = await indicatorOption(input)
+    const volume = option.series.find((item) => item.name === "成交量")
+    assert.ok(volume.data.every((item) => item.value === 0 && item.volumeRatioLabel === ""))
+    for (const name of ["K", "D", "J"]) assert.ok(option.series.find((item) => item.name === name && item.type === "line").data.every((item) => item === "-"))
+    if (input.length === 1) assert.ok(option.series.find((item) => item.name === "RSI6").data.every((item) => item === "-"))
+    const chart = requireModule("echarts").init(null, undefined, { renderer: "svg", ssr: true, width: 1000, height: 800 })
+    try {
+      chart.setOption({ ...option, animation: false })
+      assert.match(chart.renderToSVGString(), /^<svg/)
+      assert.doesNotMatch(chart.renderToSVGString(), /NaN|undefined|Infinity/)
+    } finally { chart.dispose() }
+  }
+})

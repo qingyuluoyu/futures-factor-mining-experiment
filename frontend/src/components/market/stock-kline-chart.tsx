@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import dynamic from "next/dynamic"
 import { Crosshair, Info, Maximize2, Minimize2, RotateCcw, ZoomIn, ZoomOut } from "lucide-react"
 import type { StockBar } from "@/lib/stock-api"
@@ -11,6 +11,8 @@ import { aggregateStockBars, prepareStockBars, stockBOLL, stockSMA,
   STOCK_CHART_METHOD_DESCRIPTION, STOCK_CHART_METHOD_VERSION, type StockChartPeriod } from "./stock-chart-data"
 import { toTickChartData } from "./tick/adapter"
 import { StockChartBoundary, StockChartLoading } from "./stock-chart-boundary"
+import { resolveStockChartWindow, stockChartCanvasHeight } from "./stock-chart-window"
+import { STOCK_CHART_INDICATORS, stockIndicatorWarmup, stockVolumeRatioAvailability } from "./stock-chart-indicators"
 
 const AVERAGES = [
   { period: 5, color: "#a1a1aa" },
@@ -49,20 +51,43 @@ export function StockKlineChart({ bars, upColor, downColor, height, symbolLabel,
   const [availableHeight, setAvailableHeight] = useState(420)
   const [zoomCommand, setZoomCommand] = useState({ revision: 0, scale: 1 })
   const [chartAttempt, setChartAttempt] = useState(0)
+  const workspaceRef = useRef<HTMLElement | null>(null)
+  const controlsRef = useRef<HTMLDivElement | null>(null)
+  const scope = `${symbolLabel ?? ""}:${priceAdjustmentLabel}:${volumeUnit}:${changeBasis}`
+  const [dateWindow, setDateWindow] = useState<{ bars: StockBar[]; scope: string; start: string; end: string } | null>(null)
+  const sameWindowScope = dateWindow?.bars === bars && dateWindow.scope === scope
+  const startDate = sameWindowScope ? dateWindow.start : ""
+  const endDate = sameWindowScope ? dateWindow.end : ""
+  const changeDates = (start: string, end: string): void => { setHoverTime(null); setDateWindow({ bars, scope, start, end }) }
   const retryChart = () => setChartAttempt((attempt) => attempt + 1)
   const TickCanvas = useMemo(() => dynamic(() => import("./tick/echarts-candlestick").then((module) => module.EChartsCandlestick), {
     ssr: false, loading: (state) => StockChartLoading({ error: state.error, onRetry: retryChart }),
   }), [chartAttempt])
   useEffect(() => {
-    const resize = () => setAvailableHeight(Math.max(320, Math.min(680, window.innerHeight - (fullscreen ? 160 : 300))))
+    const workspace = workspaceRef.current
+    if (!workspace) return
+    let viewport = fullscreen ? workspace : workspace.parentElement
+    while (viewport?.parentElement) {
+      if (/(auto|scroll|hidden)/.test(getComputedStyle(viewport).overflowY) && viewport.clientHeight > 0) break
+      viewport = viewport.parentElement
+    }
+    const resize = () => {
+      if (!viewport) return
+      const offset = fullscreen || height ? 0 : Math.max(0, workspace.getBoundingClientRect().top - viewport.getBoundingClientRect().top)
+      setAvailableHeight(stockChartCanvasHeight(height && !fullscreen ? height : viewport.clientHeight, controlsRef.current?.offsetHeight ?? 0, offset))
+    }
     const escape = (event: KeyboardEvent) => { if (event.key === "Escape") setFullscreen(false) }
     resize()
     window.addEventListener("resize", resize)
     window.addEventListener("keydown", escape)
-    return () => { window.removeEventListener("resize", resize); window.removeEventListener("keydown", escape) }
-  }, [fullscreen])
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(resize)
+    if (viewport) observer?.observe(viewport)
+    if (controlsRef.current) observer?.observe(controlsRef.current)
+    return () => { observer?.disconnect(); window.removeEventListener("resize", resize); window.removeEventListener("keydown", escape) }
+  }, [fullscreen, height])
   const cleaned = useMemo(() => prepareStockBars(bars), [bars])
   const data = useMemo(() => aggregateStockBars(cleaned, period, hasMore), [cleaned, period, hasMore])
+  const dateRange = useMemo(() => resolveStockChartWindow(data, startDate, endDate), [data, startDate, endDate])
   const averages = useMemo(() => AVERAGES.map((definition) => ({
     ...definition, values: stockSMA(data, definition.period),
   })), [data])
@@ -72,7 +97,7 @@ export function StockKlineChart({ bars, upColor, downColor, height, symbolLabel,
   const volumeCompare = useMemo(() => ({ enabled: volumeCompareEnabled, days: volumeCompareDays }), [volumeCompareEnabled, volumeCompareDays])
   const periodUnit = period === "week" ? "周" : period === "month" ? "月" : "日"
   const hoverIndex = hoverTime ? data.findIndex((bar) => bar.time === hoverTime) : -1
-  const selectedIndex = hoverIndex < 0 ? data.length - 1 : hoverIndex
+  const selectedIndex = dateRange.status === "ready" ? hoverIndex < 0 ? dateRange.to : hoverIndex : -1
   const selected = data[selectedIndex]
   const effectiveBasis = changeBasis === "vendor_ex_rights_pre_close" && period !== "day" ? "unavailable" : changeBasis
   const changeInfo = stockPriceChange(selected, data[selectedIndex - 1], effectiveBasis)
@@ -83,21 +108,17 @@ export function StockKlineChart({ bars, upColor, downColor, height, symbolLabel,
   const selectedBOLL = boll.find((point) => point.time === selected?.time)
 
   const tickData = useMemo(() => toTickChartData(data, effectiveBasis), [data, effectiveBasis])
-  const chartHeight = height && !fullscreen ? Math.max(320, height - 156) : availableHeight
+  const chartHeight = availableHeight
   const zoom = (scale: number) => setZoomCommand((previous) => ({ revision: previous.revision + 1, scale }))
-  const reset = () => { setVisible(60); setHoverTime(null); zoom(0) }
+  const reset = () => { setVisible(60); changeDates("", ""); zoom(0) }
 
-  const indicators: { key: "showMA" | "showVolume" | "showMACD" | "showRSI" | "showKDJ" | "showBOLL"; label: string; title: string }[] = [
-    { key: "showVolume", label: "成交量", title: `VOL及5/10${periodUnit}均量（${volumeUnit}）` },
-    { key: "showMACD", label: "MACD", title: "MACD(12,26,9)，首价EMA初始化，柱值为2×(DIF−DEA)" },
-    { key: "showRSI", label: "RSI", title: "RSI(6,14,24)，Wilder平滑，首段简单均值" },
-    { key: "showKDJ", label: "KDJ", title: "KDJ(9,3,3)，首个有效RSV初始化" },
-    { key: "showBOLL", label: "BOLL", title: "BOLL(20,2)，样本标准差，上/中/下轨" },
-    { key: "showMA", label: "MA", title: `5/10/20/60${periodUnit}简单均线` },
-  ]
+  const warmup = stockIndicatorWarmup(Math.max(0, selectedIndex + 1)).filter((item) => preferences[item.key])
+  const ratio = stockVolumeRatioAvailability(data.slice(0, Math.max(0, selectedIndex + 1)), volumeCompareDays)
+  const selectIndicatorPreset = (all: boolean): void => setPreferences({ showVolume: true, showMA: all, showMACD: all, showRSI: all, showKDJ: all, showBOLL: all })
 
   return (
-    <section aria-label="A股K线工作区" className={cn("flex min-w-0 shrink-0 flex-col bg-[var(--chart-bg)] [&>*]:shrink-0", fullscreen ? "fixed inset-0 top-[56px] z-40 overflow-y-auto" : "min-h-full")} style={height && !fullscreen ? { minHeight: height } : undefined}>
+    <section ref={workspaceRef} aria-label="A股K线工作区" className={cn("flex min-w-0 shrink-0 flex-col bg-[var(--chart-bg)] [&>*]:shrink-0", fullscreen ? "fixed inset-0 top-[56px] z-40 overflow-y-auto" : "min-h-full")} style={height && !fullscreen ? { minHeight: height } : undefined}>
+      <div ref={controlsRef} data-chart-controls>
       <div className="flex flex-wrap items-center gap-1.5 border-b border-[var(--border)] px-3 py-2">
         <button type="button" disabled title="尚未接入分时数据源，日线不能转换为分时" className={chartPillClass(false)}>分时</button>
         {([{ value: "day", label: "日K" }, { value: "week", label: "周K" }, { value: "month", label: "月K" }] as const).map((item) => (
@@ -116,7 +137,9 @@ export function StockKlineChart({ bars, upColor, downColor, height, symbolLabel,
         </div>
       </div>
       <div aria-label="K线指标选项" className="flex flex-wrap items-center gap-1.5 border-b border-[var(--border)] px-3 py-1.5">
-        {indicators.map((indicator) => <button key={indicator.key} type="button" aria-pressed={preferences[indicator.key]} title={indicator.title} onClick={() => setPreferences({ [indicator.key]: !preferences[indicator.key] })} className={chartPillClass(preferences[indicator.key])}>{indicator.label}</button>)}
+        {STOCK_CHART_INDICATORS.map((indicator) => <button key={indicator.key} type="button" aria-pressed={preferences[indicator.key]} title={indicator.title} onClick={() => setPreferences({ [indicator.key]: !preferences[indicator.key] })} className={chartPillClass(preferences[indicator.key])}>{indicator.label}</button>)}
+        <button type="button" onClick={() => selectIndicatorPreset(true)} className={chartPillClass(false)}>全部六指标</button>
+        <button type="button" onClick={() => selectIndicatorPreset(false)} className={chartPillClass(false)}>价格+成交量</button>
         {showVolume && <div className="ml-0.5 flex items-center gap-1.5 border-l border-[var(--border)] pl-2" title="本周期成交量÷此前N个同周期均量；不是盘中量比。超过60根时隐藏柱上数值，悬停仍可查看。">
           <span className="text-[10px] text-[var(--text-muted)]">量比</span>
           <button type="button" role="switch" aria-label="开启量能对比" aria-checked={volumeCompareEnabled} onClick={() => setPreferences({ volumeCompareEnabled: !volumeCompareEnabled })} className={cn("relative h-3.5 w-6 shrink-0 rounded-full transition-colors cursor-pointer", volumeCompareEnabled ? "bg-[var(--primary)]" : "bg-[var(--border)]")}><span className={cn("absolute left-0 top-0.5 h-2.5 w-2.5 rounded-full bg-white transition-transform", volumeCompareEnabled ? "translate-x-3" : "translate-x-0.5")} /></button>
@@ -125,6 +148,13 @@ export function StockKlineChart({ bars, upColor, downColor, height, symbolLabel,
           </select>
         </div>}
         <button type="button" disabled title="缺少涨停、炸板及事件数据，不能从复权日线推测异动" className={cn("ml-auto", chartPillClass(false))}>异动 · 未接入</button>
+      </div>
+      <div aria-label="已载入K线日期视窗" className="flex flex-wrap items-center gap-2 border-b border-[var(--border)] px-3 py-2 text-xs text-[var(--text-muted)]">
+        <label>开始 <input type="date" aria-label="K线开始日期" min={cleaned[0]?.time} max={cleaned.at(-1)?.time} value={startDate} onChange={(event) => changeDates(event.target.value, endDate)} className="rounded border border-[var(--border)] bg-[var(--bg-secondary)] px-2 py-1" /></label>
+        <label>结束 <input type="date" aria-label="K线结束日期" min={cleaned[0]?.time} max={cleaned.at(-1)?.time} value={endDate} onChange={(event) => changeDates(startDate, event.target.value)} className="rounded border border-[var(--border)] bg-[var(--bg-secondary)] px-2 py-1" /></label>
+        <button type="button" onClick={() => { changeDates("", ""); setVisible("all") }} className={chartPillClass(false)}>显示全部已载入日期</button>
+        <span>仅调整已载入视窗，不补采；周/月K按最后交易日日期归属，指标始终按全部已载入周期计算。</span>
+        {dateRange.status === "ready" && dateRange.visibleDateRange && <span>视窗 {dateRange.visibleDateRange.start} 至 {dateRange.visibleDateRange.end} · {dateRange.to - dateRange.from + 1} 根{periodUnit}K</span>}
       </div>
       <div className="min-h-[64px] space-y-1 border-b border-[var(--border)] bg-[var(--bg-secondary)] px-4 py-2 font-num text-xs">
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[var(--text-secondary)]">
@@ -141,15 +171,25 @@ export function StockKlineChart({ bars, upColor, downColor, height, symbolLabel,
           {showBOLL && <span className="text-fuchsia-500">BOLL(20,2) 上 {formatValue(selectedBOLL?.upper)} · 中 {formatValue(selectedBOLL?.middle)} · 下 {formatValue(selectedBOLL?.lower)}</span>}
         </div>
       </div>
+      <details aria-label="指标可用性与预热" className="border-b border-[var(--border)] px-4 py-2 text-[10px] leading-5 text-[var(--text-muted)]">
+        <summary className="cursor-pointer">指标可用性 · 截至所指周期已有 {Math.max(0, selectedIndex + 1)} 根{periodUnit}K · 不足周期 {warmup.reduce((sum, item) => sum + item.lines.filter((line) => !line.available).length, 0)} 条 · 逐线查看预热</summary>
+        <ul className="mt-1 flex flex-wrap gap-x-4 gap-y-1">{warmup.flatMap((indicator) => indicator.lines.map((line) => <li key={`${indicator.id}:${line.id}`} data-indicator-line={line.id}>
+          {line.label}：{line.available ? "数量门槛可用" : `预热不足，还缺${line.missingBars}根`}（现{indicator.availableBars}/需{line.requiredBars}根）{line.available && !line.mature ? `；EMA预热参考${line.matureBars}根，尚缺${line.missingMatureBars}根` : ""}
+        </li>))}</ul>
+        {showVolume && volumeCompareEnabled && <p>量比（前{volumeCompareDays}{periodUnit}均量）：{ratio.available ? "可用" : ratio.reason === "insufficient_bars" ? `预热不足，还缺${ratio.missingBars}根` : ratio.reason === "zero_reference_volume" ? "历史均量为零，不可计算" : "成交量缺失或无效，不可计算"}</p>}
+        <p>数量满足不保证数值可算或历史完整；零价差、缺量等仍可为空。MACD预热参考不代表EMA已收敛。</p>
+      </details>
+      </div>
       {cleaned.length < bars.length && <div role="status" className="px-4 py-1 text-xs text-[var(--accent-warn)]">已排除无效或重复日线，请核对数据源。</div>}
       <div className="relative min-w-0 shrink-0" data-chart-engine="tick-echarts">
-        {data.length ? <StockChartBoundary key={`${symbolLabel}:${period}:${chartAttempt}`} onRetry={retryChart}><TickCanvas key={`${symbolLabel}:${period}`} data={tickData} height={chartHeight}
+        {dateRange.status === "ready" ? <StockChartBoundary key={`${symbolLabel}:${period}:${startDate}:${endDate}:${chartAttempt}`} onRetry={retryChart}><TickCanvas key={`${symbolLabel}:${period}:${startDate}:${endDate}`} data={tickData} height={chartHeight}
           symbol={symbolLabel} showMA={showMA} showInfoBar={false} visibleBars={visible}
           activeIndicators={activeIndicators}
+          visibleDateRange={dateRange.visibleDateRange}
           volumeCompare={volumeCompare}
           onHoverDate={setHoverTime} crosshairEnabled={showCrosshair}
           zoomRevision={zoomCommand.revision} zoomScale={zoomCommand.scale} /></StockChartBoundary>
-          : <div role="status" className="flex min-h-80 items-center justify-center text-sm text-[var(--text-muted)]">没有可展示的有效日线。</div>}
+          : <div role={dateRange.status === "invalid" ? "alert" : "status"} className="flex min-h-80 items-center justify-center p-6 text-sm text-[var(--text-muted)]">{dateRange.status === "invalid" ? dateRange.message : data.length ? "所选日期范围没有已载入的周期K线，可调整日期或显示全部已载入日期。" : "没有可展示的有效日线。"}</div>}
       </div>
       <div className="flex flex-wrap justify-between gap-x-3 gap-y-1 border-t border-[var(--border)] px-4 py-1.5 text-[10px] text-[var(--text-muted)]">
         <span title={STOCK_PRICE_CHANGE_METHOD_VERSION}>{basisLabel}</span>

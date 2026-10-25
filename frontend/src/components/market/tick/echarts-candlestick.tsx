@@ -329,6 +329,11 @@ export const OVERLAY_INDICATORS: { key: string; label: string }[] = [
   { key: 'boll', label: 'BOLL' },
 ]
 
+export interface VisibleDateRange {
+  start: string
+  end: string
+}
+
 interface Props {
   data: OHLC[]
   markers?: ChartMarker[]
@@ -346,6 +351,8 @@ interface Props {
   onPriceDoubleClick?: (price: number, currentPrice: number) => void
   /** 默认可见蜡烛根数, 默认 60; 'all' = 初始适配显示全部返回数据 */
   visibleBars?: number | 'all'
+  /** Only the viewport changes; all earlier loaded observations remain indicator inputs. */
+  visibleDateRange?: VisibleDateRange
   /** 已激活的子图 key 列表 (含 vol, 按点击顺序) */
   activeIndicators?: string[]
   /** 成交量柱相对前 N 个交易日均量的显示设置 */
@@ -479,6 +486,22 @@ function buildSubInfoGraphics(
   return graphics
 }
 
+/** Resolve a loaded-category viewport, never slice or recompute financial series. */
+export function resolveTickDateRange(dates: readonly string[], range?: VisibleDateRange) {
+  if (!range) return null
+  const validDate = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value)
+    && Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0, 10) === value
+  if (!validDate(range.start) || !validDate(range.end) || range.start > range.end) {
+    throw new RangeError('Invalid stock chart date viewport')
+  }
+  const startValue = dates.findIndex(date => date >= range.start)
+  let endValue = dates.length - 1
+  while (endValue >= 0 && dates[endValue] > range.end) endValue--
+  if (startValue < 0 || endValue < startValue) throw new RangeError('No loaded bars in stock chart date viewport')
+  const denominator = Math.max(1, dates.length - 1)
+  return { startValue, endValue, start: startValue / denominator * 100, end: endValue / denominator * 100 }
+}
+
 export function buildTickOption(
   data: OHLC[],
   dates: string[],
@@ -494,7 +517,9 @@ export function buildTickOption(
   linkedPrice: number | null | undefined,
   volumeCompare: VolumeCompareConfig,
   addedDate: string | null | undefined,
+  visibleDateRange?: VisibleDateRange,
 ): EChartsOption {
+  const dateViewport = resolveTickDateRange(dates, visibleDateRange)
   const candleData = data.map(d => [d.open, d.close, d.low, d.high])
 
   const hasMA = showMA && data.some(d => d.ma5 != null || d.ma10 != null || d.ma20 != null || d.ma60 != null)
@@ -843,7 +868,9 @@ export function buildTickOption(
 
   // 子图信息栏 graphic
   const subStartTop = topPad + candleAvail + candleBottomPad
-  const infoGraphics = buildSubInfoGraphics(data, infoIdx, activeIndicators, subStartTop, volumeCompare)
+  // A range selects the initial viewport. A later valid hover may follow a manual pan outside it.
+  const visibleInfoIdx = infoIdx < 0 ? (dateViewport?.endValue ?? data.length - 1) : infoIdx
+  const infoGraphics = buildSubInfoGraphics(data, visibleInfoIdx, activeIndicators, subStartTop, volumeCompare)
 
   return {
     animation: false,
@@ -872,8 +899,7 @@ export function buildTickOption(
       {
         type: 'inside',
         xAxisIndex: xAxisIndices,
-        start: 0,
-        end: 100,
+        ...(dateViewport ? { startValue: dateViewport.startValue, endValue: dateViewport.endValue } : { start: 0, end: 100 }),
         moveOnMouseMove: true,
         zoomOnMouseWheel: true,
       },
@@ -899,6 +925,7 @@ export function EChartsCandlestick({
   onDateClick,
   onPriceDoubleClick,
   visibleBars = 60,
+  visibleDateRange,
   activeIndicators = [],
   volumeCompare = { enabled: true, days: 1 },
   addedDate,
@@ -928,6 +955,8 @@ export function EChartsCandlestick({
   const updateCompactPresentationRef = useRef<() => void>(() => {})
   // 竖虚线(crosshair)是否可见: 控制信息栏「至今」字段的显隐。鼠标移出图表区即 false。
   const hoverActiveRef = useRef(false)
+  // Commands belong to an existing canvas. Remounting a date/source must not replay an old command.
+  const consumedZoomRevision = useRef(zoomRevision)
 
   // 需要在闭包中访问最新值的变量 — 先声明占位，后面赋值
   const activeIndicatorsRef = useRef(activeIndicators)
@@ -984,13 +1013,17 @@ export function EChartsCandlestick({
     return m
   }, [dates])
 
+  const dateViewport = useMemo(() => resolveTickDateRange(dates, visibleDateRange), [dates, visibleDateRange?.start, visibleDateRange?.end])
+  const defaultInfoIdx = dateViewport?.endValue ?? data.length - 1
+
   // dataZoom 初始范围: 'all' = 显示整段数据, 否则取末尾 visibleBars 根
   const initialZoom = useMemo(() => {
+    if (dateViewport) return { start: dateViewport.start, end: dateViewport.end }
     const start = visibleBars === 'all'
       ? 0
       : Math.max(0, 100 - (visibleBars / Math.max(data.length, 1)) * 100)
     return { start, end: 100 }
-  }, [visibleBars, data.length])
+  }, [visibleBars, data.length, dateViewport])
 
   // ===== 信息栏 HTML 内容 (基于 infoIdxRef.current) =====
   const getInfoBarHTML = useCallback(() => {
@@ -998,7 +1031,7 @@ export function EChartsCandlestick({
     let d = idx >= 0 && idx < data.length ? data[idx] : null
     // fallback: 如果当前 idx 无数据，取最后一根 K 线
     if (!d && data.length > 0) {
-      idx = data.length - 1
+      idx = defaultInfoIdx
       d = data[idx]
     }
     if (!d) return ''
@@ -1042,7 +1075,7 @@ export function EChartsCandlestick({
     }
 
     return html
-  }, [data, stockInfo, showMA, activeIndicators])
+  }, [data, stockInfo, showMA, activeIndicators, defaultInfoIdx])
   getInfoBarHTMLRef.current = getInfoBarHTML
 
   // data/symbol 变化时重置 infoIdx:
@@ -1050,12 +1083,12 @@ export function EChartsCandlestick({
   // 但悬停上下文来自上一只股票, 必须清掉 hoverActiveRef 以免「至今/周期」残留显示。
   // (同一股的实时刷新 symbol 不变, 不触发, 悬停位置与「至今」保持实时)
   useEffect(() => {
-    infoIdxRef.current = data.length - 1
+    infoIdxRef.current = defaultInfoIdx
     compactRef.current = false
     userZoomRef.current = null
     // 新数据无悬停上下文, 隐藏「至今」; 下次鼠标移动时由 updateAxisPointer 重新置位
     hoverActiveRef.current = false
-  }, [_symbol, data.length])
+  }, [_symbol, data, defaultInfoIdx, visibleDateRange?.start, visibleDateRange?.end])
 
   // ===== 初始化 chart (只在 chartHeight 变化时重建) =====
   useEffect(() => {
@@ -1258,6 +1291,7 @@ export function EChartsCandlestick({
       linkedPrice,
       volumeCompare,
       addedDate,
+      visibleDateRange,
     )
 
     chart.setOption(option, true)
@@ -1266,7 +1300,7 @@ export function EChartsCandlestick({
     const zoom = userZoomRef.current
     if (zoom) {
       chart.dispatchAction({ type: 'dataZoom', start: zoom.start, end: zoom.end })
-    } else {
+    } else if (!dateViewport) {
       chart.dispatchAction({ type: 'dataZoom', start: initialZoom.start, end: initialZoom.end })
     }
 
@@ -1275,7 +1309,7 @@ export function EChartsCandlestick({
     if (infoEl) {
       infoEl.innerHTML = getInfoBarHTML()
     }
-  }, [data, markers, ranges, priceLines, linkedPrice, showMA, showMarkersProp, activeIndicators, volumeCompare, addedDate, chartHeight, dates, dateIndexMap, initialZoom, getInfoBarHTML, theme])
+  }, [data, markers, ranges, priceLines, linkedPrice, showMA, showMarkersProp, activeIndicators, volumeCompare, addedDate, chartHeight, dates, dateIndexMap, initialZoom, getInfoBarHTML, theme, dateViewport, visibleDateRange?.start, visibleDateRange?.end])
 
   // 渲染信息栏容器 (内容由 JS 直接写入)
   useEffect(() => {
@@ -1283,7 +1317,8 @@ export function EChartsCandlestick({
   }, [crosshairEnabled, theme, data])
   useEffect(() => {
     const chart = chartRef.current
-    if (!chart || !zoomRevision) return
+    if (!chart || !zoomRevision || consumedZoomRevision.current === zoomRevision) return
+    consumedZoomRevision.current = zoomRevision
     if (zoomScale === 0) { chart.dispatchAction({ type: 'dataZoom', ...initialZoom }); return }
     const zoom = (chart.getOption() as any)?.dataZoom?.[0]
     const end = Number(zoom?.end ?? 100)
@@ -1293,7 +1328,7 @@ export function EChartsCandlestick({
   }, [zoomRevision])
 
   const initialHTML = useMemo(() => {
-    const idx = data.length - 1
+    const idx = defaultInfoIdx
     const d = idx >= 0 && idx < data.length ? data[idx] : null
     if (!d) return ''
     const floatShares = stockInfo?.float_shares
@@ -1327,8 +1362,7 @@ export function EChartsCandlestick({
       html += `</div>`
     }
     return html
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [data, defaultInfoIdx, showMA, activeIndicators, stockInfo, theme])
 
   return (
     <div ref={hoverSurfaceRef} className="w-full">
