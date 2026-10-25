@@ -21,6 +21,19 @@
 
 ## 续做检查点
 
+最新执行22（2026-10-26）：核对计划包`docs/superpowers/plans/2026-10-26-full-system-completion-plan.md`§0.2 后发现其状态表已严重过期——按表派活会重复造七包已完成的工作。已逐包核对源码并更正该表（见§0.2/§0.3）。实况：②-A(`43d1096`)、②-B(`c69f339`)、⑤(`bb1b1e8`)、④-1/④-2(`65a75c0`)、④-4(`e21a48e`)均已完成并提交；`main.py:1163-1164`两个router已include、`core/config.py:99`开关为Settings旋钮且默认OFF。只剩④-3在建、①③受阻。
+
+1. `e21a48e` ④-4六个能力的正式API路由：五个研究kind各一条POST（`/ic/jobs`→`CreateResearchICJob`等），每个只接受自己的command schema（`kind`是`Literal[...]`，跨kind body在pydantic层422，服务不被调用），全部复用观察开关`stock_v2_jobs_enabled`（唯一真正启动v2执行器的门），`cancel`故意不门禁。顺带修掉真问题：`DatasetJobDetail.parameters`原为`DatasetBuild`装不下研究参数，而`view()`返回`job.parameters["command"]`，021一放宽kind任何研究任务的`GET /jobs/{id}`都会503 `v2_job_response_failed`；改用claim同一`TaskParameters`判别联合。文档`docs/STOCK-TASK-ROUTES-21-2026-10-26.md`。后端3246通过0新增失败（4个失败全在④-3在建文件）。
+2. `dc45726` availability实情：`reason`原称研究不可能，改为“入口已接通但内核尚未接线，提交后会以明确错误码失败”。`research_enabled`仍钉False是刻意的跨栈契约，未放宽。
+3. `6832172` 数据目录能力位（新包，同类潜在断裂）：后端`DatasetCatalog.availability()`返回真布尔、`describe()`返回`allows(qualification,"analysis")`，前端`stock-dataset-api.ts`却把`inspection_enabled`/`research_enabled`/`parquet_enabled`钉成`z.literal(false)`。今天不触发只因020未apply；020一登记服务端答true，客户端整体解析失败，面板在“功能刚好可用那天”坏掉。已改为`z.boolean()`并保留“非布尔仍拒绝”。另两个`research_enabled`钉法（`stock-custom-factor-api.ts`、`stock-dataset-jobs-api.ts`）经核对后端`stock_custom_factors.py:82`与`stock_dataset_jobs.py:82`均硬编码False，是契约不是缺陷，保持不动。
+4. `577992b` 研究kind客户端（新包）：`stock-dataset-jobs-api.ts`原把`kind`/两个version/参数全钉成观察态，五个研究POST路由无客户端。021一放宽kind，共享列表与详情会整体解析失败，观察任务一起坏。改为按持久化`kind`推导版本对与参数模型：观察任务宣称研究版本、研究任务宣称观察版本、参数标了别的kind，一律拒绝而不重新解释；`result.qualification`对**所有**kind仍钉`observation_only`（后端校验器拒绝任务宣称研究/可成交资格——运行不升级它赖以构建的数据集）。十进制字段（初始资金/无风险利率/成本设置）按字符串收发，pydantic JSON模式下Decimal序列化为字符串，走浮点会静默抹掉金额。另补每kind一个提交函数，各自只往自己路径发自己的body。`stock-dataset-jobs.tsx`列表按kind标注、详情对非观察kind明确说明本面板不展开研究参数，不发明观察字段。
+
+**本轮审计结论（防止重复排查）**：全仓扫过剩余`z.literal(false)`/`z.literal(true)`能力位，`stock-archive-catalog-api.ts`的`research_ready`/`replay_ready`、`stock-ml-models-api.ts`的`training_enabled`/`holdout_registry_verified`、`stock-eod-status-api.ts`的`calendar_verified`，后端均硬编码False/字面量，不是缺陷；其余是单位/时区/协议版本等固定常量。此类跨栈钉死缺陷只有上述两处。
+
+**验证（真跑）**：前端全量876通过0失败（868基线＋本包新增8）、TSC `--noEmit`退出0、`frontend/tsconfig.json`无改动。两个新包都用**真实pydantic `model_dump(mode="json")`输出**回放过客户端submit/list/detail三种schema（五kind全过），不是只跑单测。只提交股票独占前端四文件与两个lib，期货及共享认证/网关/布局/运行配置未碰。
+
+**未闭合**：④-3（kind派发/有界子进程/`finish_experiment`/`finish_report`）仍在写，`research_process.TASK_KERNELS`目前只有`benchmark`有真内核，其余四个由`run_unavailable`以`task_inputs_unavailable`显式拒绝——路由开放后它们会响亮失败而不是产出看似合理的报告；①重启五原端口与③tick显式预算补采仍受阻，授权前`financial_data_calls`与`paid_model_calls`保持0；020/021未apply到任何真实库，未发布构建、未接PG、未跑HTTP契约、未做本人/五年/发布回退验收。
+
 最新执行21（2026-10-26）见`docs/superpowers/plans/2026-10-26-authorized-runbook-pkg1-pkg3.md`：本轮把此前多轮“已实现待验证”但未落库的工作实际提交，共4个commit，全部只碰股票与新增股票模块，期货及共享认证/网关/布局/运行配置未改。
 
 1. `c69f339` 未确认写跨页可见（②-B）：新增`frontend/src/lib/stock-pending-writes.ts`及harness/test，localStorage键`stock-pending-writes:${userId}:${tradingMode}`，`normalize()`只留kind/idempotency_key/expected_revision/signature/created_at五字段，多余字段尤其access token落盘前丢弃；卸载不清空；重试一律带回原幂等键（服务端按`(owner_id,trading_mode,idempotency_key)`去重，016的`uq_stock_v2_job_key`）。回放工作台与研究入口挂`StockPendingWritesBanner`，回放另在挂载时重放未确认项。

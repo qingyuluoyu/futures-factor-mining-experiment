@@ -79,19 +79,32 @@ Require stack:
 
 脚本自身四条路径均实测：未修补（补齐 16 个包）/ 已完整（无需处理）/ 真多版本（`exit 1` 且不拷）/ 路径写错（`exit 1`，不静默放行）。
 
-### 0.2 剩余四包（承接执行18末）
+### 0.2 剩余四包（承接执行18末）——2026-10-26 实况核对后更正
 
-| 包 | 内容 | 状态 | 阻塞 |
+下表「未开始」是 10-26 动手前的记录。逐包核对源码后，**七包已实施并提交**，只剩 ④-3 在建、①③ 受阻。不得再按本表原样派活。
+
+| 包 | 内容 | 实况 | 证据 |
 |---|---|---|---|
-| ②-A | 工作台/行情/筛选职责收敛 | 未开始 | 无 |
-| ②-B | 跨页未确认写恢复 | 未开始 | 共享侧栏冻结，路由拦截须独立兼容包 |
-| ⑤ | 数据集资格升级（`research_only`/`backtest_ready`） | 未开始 | 离线部分无阻塞；真实 PG apply 属①授权范围 |
-| ④-1 | 迁移020 + 016 模型/schema 约束放宽 | 未开始 | 无 |
-| ④-2 | 挂载两个未挂载 router + 016 worker + 开关改 Settings 旋钮 | 未开始 | `app/main.py`、`core/config.py` 属共享接触点，需兼容设计+期货回归+回退 |
-| ④-3 | 按 kind 派发 + 新子进程 + `finish_experiment`/`finish_report` | 未开始 | 依赖 ④-1、④-2 |
-| ④-4 | 六个能力的正式 API 路由（默认 OFF） | 未开始 | 依赖 ④-3、⑤ |
+| ②-A | 工作台/行情/筛选职责收敛 | **已完成并提交** | `43d1096`；`getStockBoardsApi` 全仓仅剩 `stock-market-overview.tsx:65` 一处，`StockEodStatus` 与「盘后行情来源与缺口」审计块同样各只剩一处 |
+| ②-B | 跨页未确认写恢复 | **已完成并提交** | `c69f339`；`stock-dataset-jobs.tsx` 有真实「用原幂等键重试」路径与 `unregistered` 告警，不再只打印键 |
+| ⑤ | 数据集资格升级 | **已完成并提交** | `bb1b1e8`（迁移020，按证据定级，无手工升级入口） |
+| ④-1 | 迁移020 + 016 模型/schema 约束放宽 | **已完成并提交** | `65a75c0`（021 扩 kind 与结果形态，默认全关） |
+| ④-2 | 挂载两个未挂载 router + 016 worker + 开关改 Settings 旋钮 | **已完成并提交** | `main.py:1163-1164` 两个 router 均已 include；`core/config.py:99` `stock_research_v2_task_chain_enabled: bool = False` 为 Settings 旋钮；`StockResearchV2Worker` 已挂 |
+| ④-4 | 六个能力的正式 API 路由（默认 OFF） | **已完成并提交** | `e21a48e`，五个研究 kind 各一条 POST，默认 503；顺带修掉 021 遗留的 `DatasetJobDetail.parameters` 响应 schema。文档 `docs/STOCK-TASK-ROUTES-21-2026-10-26.md` |
+| ④-3 | 按 kind 派发 + 新子进程 + `finish_experiment`/`finish_report` | **实施中** | `task_dispatch.py`/`task_execution.py`/`research_process.py` 已建，`dataset_worker.py`/`jobs.py` 在改；`research_process.TASK_KERNELS` 目前只有 `benchmark` 有真内核，其余四个由 `run_unavailable` 显式拒绝 |
 | ① | 获准恢复原服务后的 PG/HTTP/本人与期货发布回归 | 受阻 | 需用户明确授权重启服务 |
 | ③ | tick候选来源/授权/修订/单位对账和显式预算下补采 | 受阻 | 数据/模型调用默认 0 预算，需显式授权 |
+
+### 0.3 本轮新增的两包（核对 ⑤/④ 时发现的同类跨栈缺陷）
+
+都不是新功能，是**前端 zod 把后端会变的字段钉死**的同一类潜在断裂：今天不触发（020 未 apply、研究路由默认关），但后端一旦放开，客户端会整体解析失败，面板在「功能刚好可用那天」坏掉。
+
+| 包 | 内容 | 提交 |
+|---|---|---|
+| 数据目录能力位 | `stock-dataset-api.ts` 把 `inspection_enabled`/`research_enabled`/`parquet_enabled` 钉成 `z.literal(false)`，而后端 `DatasetCatalog.availability()` 返回真布尔、`describe()` 返回 `allows(qualification,"analysis")` | `6832172` |
+| 研究 kind 客户端 | `stock-dataset-jobs-api.ts` 把 `kind`/两个 version/参数全钉成观察态，五个研究 POST 路由无客户端 | `577992b` |
+
+两包都用**真实 pydantic `model_dump(mode="json")` 输出**回放过客户端 schema，不是只跑单测。
 
 ## 1. 本轮白名单登记（AGENTS.md：股票独立白名单逐轮登记）
 
