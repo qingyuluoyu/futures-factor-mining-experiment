@@ -12,7 +12,8 @@ from app.core.deps import AuthContext, get_auth_context, get_session
 from app.core.market_capability import require_stock_market
 from app.schemas.stock_dataset_jobs_api import CancelDatasetJob, DatasetJobAvailability, DatasetJobDetail, DatasetJobPage, JobListQuery
 from app.schemas.stock_research_v2 import Scope
-from app.schemas.stock_research_v2_jobs import CreateDatasetJob
+from app.schemas.stock_research_v2_jobs import (CreateBacktestJob, CreateBenchmarkJob, CreateDatasetJob, CreateMLTrainJob,
+    CreateReportJob, CreateResearchICJob)
 from app.services.stock_research_jobs import JobError
 from app.services.stock_research_v2.jobs import JobService
 
@@ -90,6 +91,50 @@ async def submit(command: CreateDatasetJob, request: Request, queue=Depends(serv
     if getattr(request.app.state, "stock_v2_jobs_enabled", False) is not True:
         raise HTTPException(503, {"code": "v2_jobs_disabled", "message": "观察任务入口未开放；没有新建任务", "retryable": False})
     return await execute(request, queue, "submit", lambda: queue.submit(command, request_id=request.state.stock_v2_job_request_id), DatasetJobDetail)
+
+
+# One path per research kind, each accepting only its own command schema.  A kind is
+# therefore never reachable by posting another kind's body: pydantic refuses the
+# foreign payload before the service is called, so no request can rename a job into a
+# kernel it was not built for.  They share the observation switch on purpose — that
+# switch is the one that starts the v2 executor, and a research kernel without a live
+# executor could only ever queue work that nothing runs.
+RESEARCH_CLOSED = {"code": "v2_jobs_disabled", "message": "研究任务入口未开放；没有新建任务", "retryable": False}
+
+
+@router.post("/ic/jobs", response_model=DatasetJobDetail, status_code=202)
+async def submit_ic(command: CreateResearchICJob, request: Request, queue=Depends(service)):
+    if getattr(request.app.state, "stock_v2_jobs_enabled", False) is not True:
+        raise HTTPException(503, RESEARCH_CLOSED)
+    return await execute(request, queue, "submit_ic", lambda: queue.submit(command, request_id=request.state.stock_v2_job_request_id), DatasetJobDetail)
+
+
+@router.post("/backtest/jobs", response_model=DatasetJobDetail, status_code=202)
+async def submit_backtest(command: CreateBacktestJob, request: Request, queue=Depends(service)):
+    if getattr(request.app.state, "stock_v2_jobs_enabled", False) is not True:
+        raise HTTPException(503, RESEARCH_CLOSED)
+    return await execute(request, queue, "submit_backtest", lambda: queue.submit(command, request_id=request.state.stock_v2_job_request_id), DatasetJobDetail)
+
+
+@router.post("/benchmark/jobs", response_model=DatasetJobDetail, status_code=202)
+async def submit_benchmark(command: CreateBenchmarkJob, request: Request, queue=Depends(service)):
+    if getattr(request.app.state, "stock_v2_jobs_enabled", False) is not True:
+        raise HTTPException(503, RESEARCH_CLOSED)
+    return await execute(request, queue, "submit_benchmark", lambda: queue.submit(command, request_id=request.state.stock_v2_job_request_id), DatasetJobDetail)
+
+
+@router.post("/ml/jobs", response_model=DatasetJobDetail, status_code=202)
+async def submit_ml(command: CreateMLTrainJob, request: Request, queue=Depends(service)):
+    if getattr(request.app.state, "stock_v2_jobs_enabled", False) is not True:
+        raise HTTPException(503, RESEARCH_CLOSED)
+    return await execute(request, queue, "submit_ml", lambda: queue.submit(command, request_id=request.state.stock_v2_job_request_id), DatasetJobDetail)
+
+
+@router.post("/report/jobs", response_model=DatasetJobDetail, status_code=202)
+async def submit_report(command: CreateReportJob, request: Request, queue=Depends(service)):
+    if getattr(request.app.state, "stock_v2_jobs_enabled", False) is not True:
+        raise HTTPException(503, RESEARCH_CLOSED)
+    return await execute(request, queue, "submit_report", lambda: queue.submit(command, request_id=request.state.stock_v2_job_request_id), DatasetJobDetail)
 
 
 @router.post("/jobs/{identifier}/cancel", response_model=DatasetJobDetail)

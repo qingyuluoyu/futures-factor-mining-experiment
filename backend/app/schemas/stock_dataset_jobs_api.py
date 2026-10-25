@@ -4,8 +4,8 @@ from uuid import UUID
 
 from pydantic import Field, model_validator
 
-from app.schemas.stock_research_v2 import Contract, DatasetBuild, DatasetRef
-from app.schemas.stock_research_v2_jobs import JOB_KINDS, METHOD_VERSIONS, WORKFLOW_VERSIONS
+from app.schemas.stock_research_v2 import Contract, DatasetRef
+from app.schemas.stock_research_v2_jobs import JOB_KINDS, METHOD_VERSIONS, WORKFLOW_VERSIONS, TaskParameters
 
 
 class JobListQuery(Contract):
@@ -58,7 +58,11 @@ class DatasetJobSummary(Contract):
 
 
 class DatasetJobDetail(DatasetJobSummary):
-    parameters: DatasetBuild
+    # The detail view returns ``job.parameters["command"]``: an observation build for
+    # the dataset kind and one of the five research parameter models otherwise.  Using
+    # the same discriminated union the claim uses keeps a research job's detail
+    # readable instead of failing validation the moment 021 widened the kind allowlist.
+    parameters: TaskParameters
 
 
 class DatasetJobPage(Contract):
