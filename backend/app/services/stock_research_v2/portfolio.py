@@ -12,6 +12,7 @@ from app.services.stock_research_v2.corporate_actions import (apply_effective,
 from app.services.stock_research_v2.costs import calculate_costs, money, FEE_REFERENCES
 from app.services.stock_research_v2.execution import execute_order
 from app.services.stock_research_v2.metrics import compute_metrics
+from app.services.stock_research_v2.qualification import allows
 
 LIMITATIONS = [
     'Calculation output does not certify source authorization, point-in-time history or execution evidence.',
@@ -91,7 +92,7 @@ def simulate_portfolio(request: PortfolioRequest | dict, panels: PortfolioInputs
             input_sha256=input_digest,evidence=panels.evidence,
             status=status,blocking_reasons=blockers,daily=daily,targets=targets,executions=executions,
             ledger=ledger,metrics=metrics,limitations=LIMITATIONS)
-    if not request.qa_only and request.dataset.qualification!='backtest_ready':
+    if not request.qa_only and not allows(request.dataset.qualification, 'portfolio'):
         blockers.append('dataset_not_backtest_ready')
     try:
         calculate_costs(Decimal('1'),'buy',request.start,request.costs)

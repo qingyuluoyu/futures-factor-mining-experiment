@@ -58,7 +58,7 @@ class StockResearchDataset(DatasetBase):
     __tablename__ = "stock_research_datasets"
     __table_args__ = (
         UniqueConstraint("manifest_artifact_id", name="uq_stock_dataset_manifest"),
-        CheckConstraint("qualification = 'observation_only'", name="ck_stock_dataset_qualification"),
+        CheckConstraint("qualification IN ('observation_only','research_only','backtest_ready')", name="ck_stock_dataset_qualification"),
         CheckConstraint("length(data_version) = 64", name="ck_stock_dataset_version"),
     )
     id: Mapped[PythonUUID] = mapped_column(UUID(as_uuid=True), primary_key=True)

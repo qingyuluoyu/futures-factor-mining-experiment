@@ -15,6 +15,7 @@ from app.schemas.stock_ml import ModelManifest, TrainingParameters
 from app.schemas.stock_research_v2 import Scope, DatasetRef, SHA256
 from app.services.stock_research_jobs import JobError
 from app.services.stock_research_v2.ml_dataset import MLFold, frame_fingerprint
+from app.services.stock_research_v2.qualification import allows
 
 MAX_MODEL_BYTES = 8 * 1024 * 1024
 
@@ -46,7 +47,7 @@ def identity(scope, dataset):
 def fit_ranker(fold, *, scope, dataset, feature_versions, parameters=None, qa_only=False, cancel_check=None):
     scope, dataset = identity(scope, dataset)
     parameters = TrainingParameters.model_validate(parameters or {})
-    if type(qa_only) is not bool or (dataset.qualification == "observation_only" and not qa_only):
+    if type(qa_only) is not bool or (not qa_only and not allows(dataset.qualification, "ml")):
         raise JobError("dataset_not_qualified", "观察数据不能进入正式ML训练；QA模式不能作为真实研究验收", 422)
     if (not isinstance(fold, MLFold) or not isinstance(feature_versions, dict)
             or len(set(fold.feature_names)) != len(fold.feature_names) or set(feature_versions) != set(fold.feature_names)

@@ -13,6 +13,7 @@ from app.services.stock_research_v2.custom_factors import CustomFactorService
 from app.services.stock_research_v2.factor_values import resolve_factors, DEPENDENCIES
 from app.services.stock_factors.engine import PreprocessConfig
 from app.services.stock_research_v2.research_experiment import run_experiment
+from app.services.stock_research_v2.qualification import allows
 from app.services.stock_research_v2.study_inputs import load_study_inputs
 
 REPORT_VERSION = "stock-archived-factor-ml-study-v1"
@@ -25,7 +26,7 @@ async def run_archived_study(registry, receipt, *, calendar, universe, builtin_i
         raise JobError("invalid_study_context", "需要绑定本人/盘的固定列式服务", 422)
     # The registry owns the permission/version check; never trust the ref's qualification.
     await registry.read(receipt)
-    if type(qa_only) is not bool or not qa_only:
+    if type(qa_only) is not bool or (not qa_only and not allows(receipt.dataset.qualification, "ml")):
         raise JobError("dataset_not_qualified", "固定观察研究尚未正式认证，不开放生产ML；仅内部显式QA可运行", 422)
     if config is not None and not isinstance(config, PreprocessConfig):
         raise JobError("invalid_preprocessing", "预处理必须为明确类型配置", 422)
@@ -42,11 +43,12 @@ async def run_archived_study(registry, receipt, *, calendar, universe, builtin_i
     store = registry.archive.require_store()
     study = run_experiment(inputs.fields, factors, scope=registry.scope, dataset=receipt.dataset, split=split,
         horizon=horizon, groups=groups, top_n=top_n, config=config, eligible=inputs.eligible,
-        training_parameters=training_parameters, qa_only=True, store=store)
-    payload = {"report_version": REPORT_VERSION, "validation_status": "qa_only", "inputs": inputs.metadata, "study": study,
+        training_parameters=training_parameters, qa_only=qa_only, store=store)
+    payload = {"report_version": REPORT_VERSION, "validation_status": "qa_only" if qa_only else "calculation_only_unverified_inputs",
+        "inputs": inputs.metadata, "study": study,
         "persistence": "immutable_local_artifacts_not_authorized_result_registry"}
     # Source content + full calendar/pool content are bound in inputs.input_sha256.
     payload["semantic_sha256"], _ = descriptor({"study": study["semantic_sha256"], "inputs": inputs.metadata}, 4*1024*1024)
     payload["saved_report"] = asdict(store.put_json(payload))
-    logger.info("request_id=%s user_id=%s mode=%s operation=archived_study_saved data_version=%s report_sha256=%s model_calls=0 qa_only=true", request_id, registry.scope.owner_id, registry.scope.trading_mode, receipt.dataset.data_version, payload["saved_report"]["sha256"])
+    logger.info("request_id=%s user_id=%s mode=%s operation=archived_study_saved data_version=%s report_sha256=%s model_calls=0 qa_only=%s", request_id, registry.scope.owner_id, registry.scope.trading_mode, receipt.dataset.data_version, payload["saved_report"]["sha256"], str(qa_only).lower())
     return payload

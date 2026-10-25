@@ -14,6 +14,7 @@ from app.services.stock_research_v2.factor_values import compute_factors
 from app.services.stock_factors.engine import PreprocessConfig
 from app.services.stock_research_v2.ml_dataset import build_ml_dataset, split_samples
 from app.services.stock_research_v2.ml_train import fit_ranker, predict_ranker, restore_ranker
+from app.services.stock_research_v2.qualification import allows
 
 REPORT_VERSION = "stock-factor-ml-calculation-study-v1"
 
@@ -23,7 +24,7 @@ def run_experiment(fields, factors, *, scope, dataset, split, horizon=20, groups
     scope, dataset, split = Scope.model_validate(scope), DatasetRef.model_validate(dataset), TimeSplit.model_validate(split)
     if type(top_n) is not int or not 1 <= top_n <= 300:
         raise ValueError("候选持股数量须为1至300")
-    if dataset.qualification == "observation_only" and not qa_only:
+    if not qa_only and not allows(dataset.qualification, "ml"):
         raise JobError("dataset_not_qualified", "观察归档不能直接成为正式研究输入", 422)
     config = config or PreprocessConfig()
     bundle = compute_factors(fields, factors, config=config, industry=industry, eligible=eligible)

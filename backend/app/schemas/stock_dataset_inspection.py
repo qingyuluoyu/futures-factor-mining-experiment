@@ -1,4 +1,5 @@
 from datetime import date
+import re
 from typing import Literal
 from uuid import UUID
 
@@ -78,6 +79,51 @@ class DatasetSourceSummary(Contract):
     kind: Literal["daily", "valuation", "financial"]
 
 
+class FieldCoverage(Contract):
+    """Per-field eligible-observation counts; never a fabricated coverage percentage."""
+    raw_observations: int = Field(ge=0)
+    eligible_observations: int = Field(ge=0)
+    source_null: int = Field(ge=0)
+    excluded_domain: int = Field(ge=0)
+    basis_unverified: int = Field(ge=0)
+    temporal_unverified: int = Field(ge=0)
+
+
+class SourceAuthorizationEvidence(Contract):
+    """Version-bound record that a fixed source batch's data use is authorized.
+
+    Supplying this object is the only way to evidence source authorization; it is
+    never inferred from a request flag and never defaults to granted.
+    """
+    record: str = Field(min_length=1, max_length=200)
+    evidence_version: str = Field(pattern=SHA256)
+    scope: Literal["research", "backtest"]
+
+
+class CapabilityAssessment(Contract):
+    """One per-action capability, resolved against the rules actually requested."""
+    name: Literal["analysis", "portfolio", "ml", "rotation"]
+    required_fields: list[str]
+    coverage: dict[str, FieldCoverage]
+    missing_reasons: list[str]
+    allowed_scope: Literal["none", "qa_only", "research_only", "backtest_ready"]
+    limitations: list[str] = Field(max_length=20)
+
+    @field_validator("required_fields")
+    @classmethod
+    def fields(cls, values):
+        if len(values) != len(set(values)) or any(not re.fullmatch(r"[a-z_][a-z_0-9]{0,31}", value) for value in values):
+            raise ValueError("能力依赖字段重复或标识无效")
+        return sorted(values)
+
+    @field_validator("missing_reasons")
+    @classmethod
+    def reasons(cls, values):
+        if len(values) != len(set(values)) or any(not re.fullmatch(r"[a-z_][a-z_0-9_]*(?::[^\s:]{1,160})?", value) for value in values):
+            raise ValueError("阻断原因重复或格式无效")
+        return sorted(values)
+
+
 class DatasetDescription(Contract):
     reference: DatasetRef
     manifest_version: Literal["stock-observation-manifest-v1"]
@@ -89,16 +135,16 @@ class DatasetDescription(Contract):
     instruments: list[str] = Field(min_length=1, max_length=10000)
     sources: list[DatasetSourceSummary] = Field(min_length=1, max_length=1000)
     integrity: Literal["manifest_verified_sources_not_checked"]
-    research_enabled: Literal[False]
+    research_enabled: bool
     limitations: list[str] = Field(max_length=20)
 
 
 class DatasetAvailability(Contract):
     catalog_enabled: bool
     detail_enabled: bool
-    inspection_enabled: Literal[False]
-    research_enabled: Literal[False]
-    parquet_enabled: Literal[False]
+    inspection_enabled: bool
+    research_enabled: bool
+    parquet_enabled: bool
     reason: str
 
 
