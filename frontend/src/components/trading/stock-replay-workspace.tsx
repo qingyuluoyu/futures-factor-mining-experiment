@@ -18,7 +18,7 @@ import {
   type ReplayOrderInput, type ReplayView,
 } from "@/lib/stock-replay-api"
 import { prepareReplayMutation, replayAccountStorageKey, replayCreateError, replayOrderError, replayOrderReason } from "./stock-replay-state"
-import { clearPendingWrite, readPendingWrites, recordPendingWrite, type PendingWriteEntry } from "@/lib/stock-pending-writes"
+import { clearPendingWrite, pendingWriteFailureMessage, readPendingWrites, recordPendingWrite, type PendingWriteEntry } from "@/lib/stock-pending-writes"
 
 type ReplayTab = "overview" | "orders" | "positions" | "assets"
 const REPLAY_PAGES = [
@@ -228,13 +228,21 @@ function ReplaySession({ userId, tradingMode, initialTab }: { userId: string; tr
   async function runMutation(command: Mutation): Promise<void> {
     if (mutationInFlight.current || (retry && command !== retry) || !isCurrentSession()) return
     mutationInFlight.current = true
-    readSequence.current += 1
     setBusy(true)
     setError(null)
     setMessage(null)
     setRetry(null)
-    recordPendingWrite(pendingWriteScope, replayPendingEntry(command))
     try {
+      const registration = recordPendingWrite(pendingWriteScope, replayPendingEntry(command))
+      if (!registration.ok) {
+        if (isCurrentSession()) {
+          setError(pendingWriteFailureMessage(registration.reason))
+          setRetry(command)
+        }
+        return
+      }
+      // A locally rejected command must not invalidate a read when no mutation was sent.
+      readSequence.current += 1
       let result: ReplayView
       switch (command.kind) {
         case "create": result = await createStockReplayAccount(command.body); break

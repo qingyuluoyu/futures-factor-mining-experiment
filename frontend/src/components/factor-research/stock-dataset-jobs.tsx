@@ -2,10 +2,10 @@
 
 import { useEffect, useRef, useState } from "react"
 import { cancelStockDatasetJob, getStockDatasetJob, getStockDatasetJobAvailability, isObservationDetail, listStockDatasetJobs, submitStockDatasetJob, type CreateDatasetJob, type DatasetJobDetail, type DatasetJobPage } from "@/lib/stock-dataset-jobs-api"
-import { clearPendingWrite, readPendingWrites, recordPendingWrite, type PendingWriteEntry } from "@/lib/stock-pending-writes"
+import { clearPendingWrite, pendingWriteFailureMessage, readPendingWrites, recordPendingWrite, type PendingWriteEntry } from "@/lib/stock-pending-writes"
 
 type Identity = { token: string; scope: string }
-type State = { identity: Identity; page: DatasetJobPage | null; offset: number; accepting: boolean; reason: string; loading: boolean; error: string; detail: DatasetJobDetail | null; retry: CreateDatasetJob | null; unregistered: boolean }
+type State = { identity: Identity; page: DatasetJobPage | null; offset: number; accepting: boolean; reason: string; loading: boolean; error: string; detail: DatasetJobDetail | null; retry: CreateDatasetJob | null; unregistered: string }
 const LIMIT = 20
 const labels = { pending: "等待执行", running: "执行中", completed: "观察归档已生成", cancelled: "已取消", expired: "已过期", failed: "失败" }
 /** 任务表按迁移021含六种 kind；本面板只提交观察归档，但必须把研究类型如实标出来，
@@ -41,7 +41,7 @@ function latestPendingJob(scope: string): CreateDatasetJob | null {
 
 function initial(identity: Identity): State {
   return { identity, page: null, offset: 0, accepting: false, reason: "", loading: true, error: "", detail: null,
-    retry: identity.scope ? latestPendingJob(identity.scope) : null, unregistered: false }
+    retry: identity.scope ? latestPendingJob(identity.scope) : null, unregistered: "" }
 }
 
 export function StockDatasetJobs({ token, scope, command }: { token: string; scope: string; command?: CreateDatasetJob }): React.JSX.Element {
@@ -90,13 +90,20 @@ export function StockDatasetJobs({ token, scope, command }: { token: string; sco
     })
   }
 
-  /** 发出请求前先按原键登记；读回核实，登记被静默丢弃（如参数超出单字段上限）时不承诺可重试。 */
-  function register(job: CreateDatasetJob): void {
-    recordPendingWrite(scope, { kind: PENDING_KIND, idempotency_key: job.idempotency_key,
-      signature: JSON.stringify(job), created_at: new Date().toISOString() })
-    const registered = readPendingWrites(scope).some((entry) => entry.kind === PENDING_KIND && entry.idempotency_key === job.idempotency_key)
+  /** 发出请求前先按原键登记，**只有拿到明确回执才继续**。读回只是第二道核实：同键不同内容时
+   *  注册表拒绝并保留旧条目，单凭读回会查到那个键而误判成已登记。 */
+  function register(job: CreateDatasetJob): boolean {
+    const signature = JSON.stringify(job)
+    const receipt = recordPendingWrite(scope, { kind: PENDING_KIND, idempotency_key: job.idempotency_key,
+      signature, created_at: new Date().toISOString() })
+    // 回执是判据：读回只是第二道核实，同键不同内容时注册表拒绝并保留旧条目，
+    // 单凭读回会查到那个键而误判成已登记，进而把新命令借旧键发出去。
+    const blocked = receipt.ok ? "" : pendingWriteFailureMessage(receipt.reason)
+    const registered = receipt.ok && readPendingWrites(scope).some((entry) => entry.kind === PENDING_KIND
+      && entry.idempotency_key === job.idempotency_key && entry.signature === signature)
     setState((previous) => previous.identity === identity.current
-      ? { ...previous, retry: registered ? job : previous.retry, unregistered: !registered } : previous)
+      ? { ...previous, retry: registered ? job : previous.retry, unregistered: registered ? "" : blocked } : previous)
+    return registered
   }
 
   /** ``retry`` 为重发原请求：未知结果的错误提示仍在也放行，否则一旦出错就再也提交不了。 */
@@ -104,12 +111,14 @@ export function StockDatasetJobs({ token, scope, command }: { token: string; sco
     if (!candidate || !visible.accepting || visible.loading) return
     if (!retry && visible.error) return
     const job = candidate
-    register(job)
+    // 登记没成功就绝不发出金融请求：服务端按 (owner, mode, 幂等键) 去重，
+    // 借一个已被占用的键发出去只会拿到旧任务，而界面显示的是新参数。
+    if (!register(job)) return
     void (async () => {
       const settled = await perform(async (origin, signal) => ({ detail: await submitStockDatasetJob(job, origin.token, signal) }))
       if (!settled) return
       clearPendingWrite(scope, job.idempotency_key)
-      setState((previous) => previous.identity === identity.current ? { ...previous, retry: null, unregistered: false } : previous)
+      setState((previous) => previous.identity === identity.current ? { ...previous, retry: null, unregistered: "" } : previous)
     })()
   }
 
@@ -129,7 +138,7 @@ export function StockDatasetJobs({ token, scope, command }: { token: string; sco
     {visible.reason && <p>{visible.reason}</p>}
     {visible.loading && <p role="status">正在读取或确认任务…</p>}
     {visible.error && <p role="alert">{visible.error}。提交超时后请保留原幂等键核对，不要换键重复创建。</p>}
-    {visible.unregistered && <p role="alert">本次提交无法登记跨页重试（参数过大或字段超限）。请保留当前幂等键，不要换键重复创建。</p>}
+    {visible.unregistered && <p role="alert">{visible.unregistered}请保留当前幂等键，不要换键重复创建；未确认前不要改写固定来源或股票池。</p>}
     {retryable && <div className="space-y-2 rounded border border-dashed p-2"><p>有一次观察任务提交结果未确认（{retryable.parameters.pool_id}，{retryable.parameters.start} 至 {retryable.parameters.end}）。不会自动重发。</p>
       <p className="break-all">原幂等键：{retryable.idempotency_key}</p>
       <button type="button" className={buttonClass} disabled={!visible.accepting || visible.loading} onClick={() => submit(retryable, true)}>用原幂等键重试</button></div>}

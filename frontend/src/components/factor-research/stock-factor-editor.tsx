@@ -2,12 +2,12 @@
 
 import { useEffect, useRef, useState } from "react"
 import { disableCustomFactor, getCustomFactorAvailability, listCustomFactors, saveCustomFactor, validateCustomFactor, type CompiledFactor, type CustomFactor, type CustomFactorAvailability, type CustomFactorCommand, type CustomFactorPage } from "@/lib/stock-custom-factor-api"
-import { clearPendingWrite, readPendingWrites, recordPendingWrite, type PendingWriteEntry } from "@/lib/stock-pending-writes"
+import { clearPendingWrite, pendingWriteFailureMessage, readPendingWrites, recordPendingWrite, type PendingWriteEntry } from "@/lib/stock-pending-writes"
 
 type Identity = { token: string; scope: string }
 type Draft = { name: string; expression: string; description: string; direction: "high" | "low" }
 type EditorState = {
-  identity: Identity; availability: CustomFactorAvailability | null; busy: boolean; error: string; notice: string
+  identity: Identity; availability: CustomFactorAvailability | null; busy: boolean; error: string; notice: string; pendingRecorded: boolean
   page: CustomFactorPage; offset: number; history: CustomFactorPage | null; historyOffset: number
   draft: Draft; editing: CustomFactor | null; validation: CompiledFactor | null; validatedFor: string; confirmDisable: boolean
 }
@@ -65,7 +65,7 @@ const LIMIT = 20
 const controlClass = "rounded border border-[var(--border)] bg-[var(--bg-secondary)] px-2 py-1.5 text-xs disabled:opacity-50"
 const buttonClass = `${controlClass} cursor-pointer disabled:cursor-not-allowed`
 function empty(identity: Identity): EditorState {
-  return { identity, availability: null, busy: false, error: "", notice: "", page: { items: [], total: 0, has_more: false }, offset: 0, history: null, historyOffset: 0,
+  return { identity, availability: null, busy: false, error: "", notice: "", pendingRecorded: false, page: { items: [], total: 0, has_more: false }, offset: 0, history: null, historyOffset: 0,
     draft: { name: "", expression: "", direction: "high", description: "" }, editing: null, validation: null, validatedFor: "", confirmDisable: false }
 }
 
@@ -112,7 +112,7 @@ export function StockFactorEditor({ token, scope }: { token: string; scope: stri
   useEffect(() => {
     const origin = identity.current
     pending.current = factorPendingWrite(origin.scope, origin)
-    setState(empty(origin))
+    setState({ ...empty(origin), pendingRecorded: pending.current !== null })
     load()
     return () => { active.current?.abort(); active.current = null }
   }, [token, scope])
@@ -120,7 +120,13 @@ export function StockFactorEditor({ token, scope }: { token: string; scope: stri
   async function commit(command: PendingWrite, signal: AbortSignal) {
     const origin = command.identity
     if (identity.current !== origin || signal.aborted) return
-    recordPendingWrite(origin.scope, factorPendingEntry(command))
+    patch(origin, { notice: "" })
+    const registration = recordPendingWrite(origin.scope, factorPendingEntry(command))
+    if (!registration.ok) {
+      patch(origin, { pendingRecorded: false })
+      throw new Error(pendingWriteFailureMessage(registration.reason))
+    }
+    patch(origin, { pendingRecorded: true })
     let saved: CustomFactor
     try {
       saved = command.kind === "save" ? await saveCustomFactor(command.body, origin.token, signal, command.editing)
@@ -136,7 +142,7 @@ export function StockFactorEditor({ token, scope }: { token: string; scope: stri
     if (identity.current !== origin || signal.aborted) return
     pending.current = null
     clearPendingWrite(origin.scope, command.body.idempotency_key)
-    patch(origin, { editing: saved, draft: { name: saved.name, expression: saved.expression, description: saved.description, direction: saved.direction }, validation: null, validatedFor: "", confirmDisable: false, history: null,
+    patch(origin, { editing: saved, draft: { name: saved.name, expression: saved.expression, description: saved.description, direction: saved.direction }, validation: null, validatedFor: "", confirmDisable: false, history: null, pendingRecorded: false,
       notice: command.kind === "save" ? `定义已保存：${saved.name} v${saved.revision}；未启动IC、回测或模型。` : "已停用；历史定义和已保存研究引用不会删除。" })
     try {
       const page = await listCustomFactors({ limit: LIMIT, offset: 0 }, origin.token, signal)
@@ -217,7 +223,7 @@ export function StockFactorEditor({ token, scope }: { token: string; scope: stri
         {state.editing && !state.editing.disabled && <button type="button" className={buttonClass} disabled={locked} onClick={() => patch(identity.current, { confirmDisable: true })}>停用当前因子</button>}
         {unresolved && <button type="button" className={buttonClass} disabled={state.busy} onClick={() => { const command = pending.current; if (command) perform((signal) => commit(command, signal)) }}>重试原请求</button>}
       </div>
-      {unresolved && !state.busy && <p role="alert">上次写入结果未确认；原参数与原幂等键已保存在本浏览器，离开页面、切换页面或刷新都不会丢失，也不会自动重发。只有点击「重试原请求」才会用同一个幂等键重试，服务端据此去重，不会重复新建或改写历史版本；重试前请先核对定义列表。</p>}
+      {unresolved && !state.busy && <p role="alert">{state.pendingRecorded ? "上次写入结果未确认；原参数与原幂等键已登记在本浏览器，离开页面后可继续核对。" : "本次尝试未请求后端，未确认本地可靠登记；原命令仍保留在当前页面，登记成功前请保持本页。此前若曾发出请求，结果仍需按原键核对。"}不会自动重发。只有点击「重试原请求」才会先重新登记并用同一个幂等键重试，服务端据此去重，不会重复新建或改写历史版本；重试前请先核对定义列表。</p>}
       {state.confirmDisable && state.editing && <div role="alert" className="space-x-2"><span>停用后禁止新选用，不能编辑；历史版本不删除。是否确认？</span>
         <button type="button" className={buttonClass} disabled={locked} onClick={() => { const record = state.editing; if (record) perform(async (signal, origin) => { const command: PendingWrite = { identity: origin, kind: "disable", id: record.id, body: { expected_revision: record.latest_revision, idempotency_key: crypto.randomUUID() } }; pending.current = command; await commit(command, signal) }) }}>确认停用</button>
         <button type="button" className={buttonClass} disabled={state.busy || unresolved} onClick={() => patch(identity.current, { confirmDisable: false })}>取消停用</button>

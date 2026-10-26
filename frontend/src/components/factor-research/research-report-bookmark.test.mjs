@@ -148,6 +148,25 @@ test("an unconfirmed bookmark write survives navigation, carries no token and is
   returned.unmount()
 })
 
+test("an unconfirmed bookmark whose registration also failed says so instead of promising cross-page recovery", async () => {
+  // 写已经发出且结果未知，此刻**必须**登记；登记也失败（注册表已满）时不能仍宣称
+  // "离开页面不丢失"——那条记录根本没留下，用户会以为换页还能恢复。
+  const storage = memoryStorage({
+    "stock-pending-writes:user:virtual": JSON.stringify(Array.from({ length: 8 }, (_, position) =>
+      ({ kind: "report-bookmark", idempotency_key: `key-${position}`, signature: JSON.stringify({ id: `other-${position}`, bookmarked: true }), created_at: "2026-10-26T00:00:00.000Z" }))),
+  })
+  const page = mount({ storage }); await page.ready()
+  page.controls.writeError = new Error("network uncertain")
+  await button(page, "收藏报告").props.onClick(); await page.ready()
+  assert.equal(page.calls.write.length, 1)
+  const shown = text(page.render())
+  assert.match(shown, /保存结果尚未确认/)
+  assert.match(shown, /未能登记|无法登记|尚未发送/)
+  // 满载绝不驱逐任何一条别人的未确认写
+  assert.equal(JSON.parse(storage.getItem("stock-pending-writes:user:virtual")).length, 8)
+  page.unmount()
+})
+
 test("a confirmed bookmark state clears the unconfirmed write", async () => {
   const storage = memoryStorage()
   const page = mount({ storage }); await page.ready()

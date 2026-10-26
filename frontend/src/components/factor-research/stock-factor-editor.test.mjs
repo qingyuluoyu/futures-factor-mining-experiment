@@ -17,8 +17,12 @@ function mount({ enabled = true } = {}, store = new Map()) {
   const slots = [], effects = [], calls = []
   let cursor = 0, key = 0
   const props = { token: "token-one", scope: "owner:virtual" }
-  const controls = { saveFails: false, deferred: null, listFails: false }
-  const localStorage = { getItem: (name) => store.get(name), setItem: (name, value) => store.set(name, value), removeItem: (name) => store.delete(name) }
+  const controls = { saveFails: false, deferred: null, listFails: false, storageReadFails: false, storageWriteFails: false, storageDropsWrite: false }
+  const localStorage = {
+    getItem: (name) => { if (controls.storageReadFails) throw new Error("private storage read diagnostics"); return store.get(name) ?? null },
+    setItem: (name, value) => { if (controls.storageWriteFails) throw new Error("private storage write diagnostics"); if (!controls.storageDropsWrite) store.set(name, value) },
+    removeItem: (name) => store.delete(name),
+  }
   const dependencies = {
     react: {
       useState(initial) { const index = cursor++; if (!(index in slots)) slots[index] = typeof initial === "function" ? initial() : initial; return [slots[index], (value) => { slots[index] = typeof value === "function" ? value(slots[index]) : value }] },
@@ -43,7 +47,7 @@ function mount({ enabled = true } = {}, store = new Map()) {
   const render = () => { cursor = 0; const tree = module.exports.StockFactorEditor(props); effects.splice(0).forEach((effect) => effect()); return tree }
   const ready = async () => { for (let index = 0; index < 4; index++) { render(); await settle() } }
   render()
-  return { render, ready, calls, controls, props, storage: store, pendingWrites: dependencies["@/lib/stock-pending-writes"], unmount: () => slots.forEach((slot) => slot?.cleanup?.()) }
+  return { render, ready, calls, controls, props, storage: store, get allocatedKeys() { return key }, pendingWrites: dependencies["@/lib/stock-pending-writes"], unmount: () => slots.forEach((slot) => slot?.cleanup?.()) }
 }
 
 function nodes(tree) { if (Array.isArray(tree)) return tree.flatMap(nodes); return tree && typeof tree === "object" ? [tree, ...nodes(tree.props?.children)] : [] }
@@ -195,5 +199,110 @@ test("editing a saved definition explicitly creates the next revision and invali
   assert.equal(writes[1].body.direction, "low")
   assert.equal(writes[1].body.description, "历史版本不能改写")
   assert.match(text(page.render()), /v2/)
+  page.unmount()
+})
+
+async function validatedDraft(page) {
+  await page.ready()
+  edit(page, "自定义因子名称", "待登记动量"); edit(page, "自定义因子表达式", "close")
+  button(page, "校验表达式").props.onClick(); await page.ready()
+}
+
+function pendingEntry(id = 0) {
+  return { kind: "replay-order", idempotency_key: `e682700b-7415-47d6-84c0-${String(id).padStart(12, "0")}`, signature: JSON.stringify({ accountId: `old-${id}`, body: { expected_revision: id } }), expected_revision: id, created_at: "2026-10-26T06:10:00Z" }
+}
+
+function assertBlocked(page) {
+  assert.equal(page.calls.filter((call) => call.kind === "save" || call.kind === "disable").length, 0)
+  assert.match(text(page.render()), /登记|恢复|存储|未确认/)
+  assert.doesNotMatch(text(page.render()), /定义已保存：|已停用；|private storage/)
+  assert.doesNotMatch(text(page.render()), /原参数与原幂等键已保存在本浏览器/)
+  assert.equal(button(page, "重试原请求").props.disabled, false, "a failed registration must release busy while preserving the command")
+  assert.equal(field(page, "自定义因子名称").props.disabled, true)
+  assert.equal(page.allocatedKeys, 1)
+}
+
+test("a full eight-entry registry blocks factor save without evicting old writes and retries the same key after capacity returns", async () => {
+  const page = mount(); await validatedDraft(page)
+  for (let index = 0; index < 8; index++) page.pendingWrites.recordPendingWrite(page.props.scope, pendingEntry(index))
+  const storageKey = page.pendingWrites.pendingWriteStorageKey(page.props.scope)
+  const original = page.storage.get(storageKey)
+  button(page, "保存定义").props.onClick(); await page.ready()
+  assertBlocked(page)
+  assert.equal(page.storage.get(storageKey), original)
+  assert.equal(page.pendingWrites.readPendingWrites(page.props.scope).length, 8)
+  page.pendingWrites.clearPendingWrite(page.props.scope, pendingEntry(0).idempotency_key)
+  button(page, "重试原请求").props.onClick(); await page.ready()
+  const saves = page.calls.filter((call) => call.kind === "save")
+  assert.equal(saves.length, 1)
+  assert.equal(saves[0].body.idempotency_key, "f682700b-7415-47d6-84c0-000000000001")
+  assert.equal(page.allocatedKeys, 1)
+  assert.equal(saves[0].body.name, "待登记动量")
+  assert.deepEqual(plain(page.pendingWrites.readPendingWrites(page.props.scope)).map((entry) => entry.idempotency_key), Array.from({ length: 7 }, (_, i) => pendingEntry(i + 1).idempotency_key))
+  assert.match(text(page.render()), /定义已保存/)
+  page.unmount()
+})
+
+test("real storage read write and readback failures block save and retain the original command for explicit retry", async () => {
+  for (const failure of ["storageReadFails", "storageWriteFails", "storageDropsWrite"]) {
+    const page = mount(); await validatedDraft(page)
+    page.pendingWrites.recordPendingWrite(page.props.scope, pendingEntry())
+    const storageKey = page.pendingWrites.pendingWriteStorageKey(page.props.scope)
+    const original = page.storage.get(storageKey)
+    page.controls[failure] = true
+    button(page, "保存定义").props.onClick(); await page.ready()
+    assertBlocked(page)
+    assert.equal(page.storage.get(storageKey), original)
+    page.controls[failure] = false
+    assert.equal(page.calls.filter((call) => call.kind === "save").length, 0, "recovery cannot automatically send a previously blocked request")
+    button(page, "重试原请求").props.onClick(); await page.ready()
+    const saves = page.calls.filter((call) => call.kind === "save")
+    assert.equal(saves.length, 1)
+    assert.equal(saves[0].body.idempotency_key, "f682700b-7415-47d6-84c0-000000000001")
+    assert.equal(page.allocatedKeys, 1)
+    assert.equal(page.pendingWrites.readPendingWrites(page.props.scope)[0].idempotency_key, pendingEntry().idempotency_key)
+    page.unmount()
+  }
+})
+
+test("same-key conflicting signature never overwrites an older command or sends the new factor API request", async () => {
+  const page = mount(); await validatedDraft(page)
+  const key = "f682700b-7415-47d6-84c0-000000000001"
+  const older = { ...pendingEntry(), idempotency_key: key, kind: "custom-factor-save", signature: JSON.stringify({ name: "不同原命令", expression: "high", description: "旧版本", direction: "low" }) }
+  page.pendingWrites.recordPendingWrite(page.props.scope, older)
+  const storageKey = page.pendingWrites.pendingWriteStorageKey(page.props.scope), original = page.storage.get(storageKey)
+  button(page, "保存定义").props.onClick(); await page.ready()
+  assertBlocked(page)
+  assert.equal(page.storage.get(storageKey), original)
+  page.pendingWrites.clearPendingWrite(page.props.scope, key)
+  button(page, "重试原请求").props.onClick(); await page.ready()
+  const save = page.calls.find((call) => call.kind === "save")
+  assert.equal(save.body.idempotency_key, key)
+  assert.equal(save.body.expression, "close")
+  assert.equal(save.body.direction, "high")
+  assert.equal(page.allocatedKeys, 1)
+  page.unmount()
+})
+
+test("disable still needs confirmation and durable registration before requesting the exact original revision", async () => {
+  const page = mount(); await validatedDraft(page)
+  button(page, "保存定义").props.onClick(); await page.ready()
+  button(page, "停用当前因子").props.onClick(); await page.ready()
+  assert.equal(page.calls.filter((call) => call.kind === "disable").length, 0)
+  page.controls.storageWriteFails = true
+  button(page, "确认停用").props.onClick(); await page.ready()
+  assert.equal(page.calls.filter((call) => call.kind === "disable").length, 0)
+  assert.doesNotMatch(text(page.render()), /定义已保存：|已停用；|private storage/)
+  assert.equal(button(page, "重试原请求").props.disabled, false)
+  assert.equal(page.allocatedKeys, 2)
+  page.controls.storageWriteFails = false
+  button(page, "重试原请求").props.onClick(); await page.ready()
+  const disabled = page.calls.filter((call) => call.kind === "disable")
+  assert.equal(disabled.length, 1)
+  assert.equal(disabled[0].id, identifier)
+  assert.equal(disabled[0].body.expected_revision, 1)
+  assert.equal(disabled[0].body.idempotency_key, "f682700b-7415-47d6-84c0-000000000002")
+  assert.equal(page.allocatedKeys, 2)
+  assert.match(text(page.render()), /已停用；/)
   page.unmount()
 })

@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react"
 import { useAuthStore } from "@/stores/auth"
 import { getStockReportBookmark, setStockReportBookmark, stockResearchScope, type StockReportBookmark } from "@/lib/stock-research-api"
-import { clearPendingWrite, newPendingWriteKey, readPendingWrites, recordPendingWrite, type PendingWriteEntry } from "@/lib/stock-pending-writes"
+import { clearPendingWrite, newPendingWriteKey, pendingWriteFailureMessage, readPendingWrites, recordPendingWrite, type PendingWriteEntry } from "@/lib/stock-pending-writes"
 
 /** 本组件登记的未确认写类型；服务端没有幂等键，用本地句柄配对登记与清除。 */
 const PENDING_KIND = "report-bookmark"
@@ -88,9 +88,11 @@ export function ResearchReportBookmark({ jobId, token, scope, onChanged }: { job
     } catch (failure) {
       if (!valid()) return
       setUnknown(true)
-      setError(`保存结果尚未确认，请先查询收藏状态；未自动重写。${failure instanceof Error ? failure.message : "请求失败"}`)
-      recordPendingWrite(scope, { kind: PENDING_KIND, idempotency_key: newPendingWriteKey(),
+      // 请求已发出而结果未知，此刻登记是唯一能跨页恢复它的机会；登记本身也失败时
+      // 必须如实说明，不能仍暗示"离开页面、刷新都不会丢失"。
+      const receipt = recordPendingWrite(scope, { kind: PENDING_KIND, idempotency_key: newPendingWriteKey(),
         signature: JSON.stringify({ id: jobId, bookmarked: !view.bookmarked }), created_at: new Date().toISOString() })
+      setError(`保存结果尚未确认，请先查询收藏状态；未自动重写。${receipt.ok ? "" : pendingWriteFailureMessage(receipt.reason)}${failure instanceof Error ? failure.message : "请求失败"}`)
       syncPending()
     } finally {
       if (valid()) { inflight.current = false; setWriting(false) }

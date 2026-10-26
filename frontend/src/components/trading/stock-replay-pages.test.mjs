@@ -13,13 +13,24 @@ const text = (tree) => Array.isArray(tree) ? tree.map(text).join("") : tree && t
 const plain = (value) => JSON.parse(JSON.stringify(value))
 const view = { id: "account-a", trading_mode: "virtual", name: "本人回放", status: "active", revision: 7, current_date: "2026-10-16", start_date: "2026-10-15", end_date: "2026-10-23", initial_cash: "123456.78", cash: "10000.00", equity: "11000.00", available_cash: "10000.00", reserved_cash: "0.00", total_pnl: "0.00", realized_pnl: "0.00", fees_paid: "5.00", orders: [{ id: "order-a", status: "pending" }], positions: [{ code: "000001", quantity: 100, available_quantity: 0 }], instruments: [{ code: "000001", name: "证券" }], chart: { code: "000001", bars: [{ time: "2026-10-16", open: 10, high: 11, low: 9, close: 10, volume: 100 }] }, data_versions: [], currency: "CNY", method_version: "existing-method" }
 
-function mount(role = "overview", api = {}, store = new Map()) {
+function mount(role = "overview", api = {}, store = new Map(), options = {}) {
   const states = [], calls = [], storage = store
   let cursor = 0, auth = { id: "owner", market_type: "stock", trading_mode: "virtual" }
   const Chart = () => null, History = () => null, Button = () => null, Input = () => null, Link = () => null, Banner = () => null
   const overrides = { 0: { enabled: true, datasets: [{ id: "data-a", code: "000001", name: "证券", start_date: "2026-10-15", end_date: "2026-10-23", source: "authorized-fixture", version: "v1" }] }, 1: [{ id: "account-a", name: "本人回放", current_date: "2026-10-16" }, { id: "account-b", name: "另一个回放", current_date: "2026-10-15" }], 3: view.id, 5: view, 6: false }
-  const localStorage = { getItem: (key) => storage.get(key), setItem: (key, value) => storage.set(key, value), removeItem: (key) => storage.delete(key) }
-  const dependencies = {
+  const storageControls = { readFailure: false, writeFailure: false, ...options.storageControls }
+  const generatedKeys = []
+  const localStorage = {
+    getItem: (key) => { if (key.startsWith("stock-pending-writes:") && storageControls.readFailure) throw new Error("test storage read denied"); return storage.has(key) ? storage.get(key) : null },
+    setItem: (key, value) => { if (key.startsWith("stock-pending-writes:") && storageControls.writeFailure) throw new Error("test storage quota"); storage.set(key, value) },
+    removeItem: (key) => storage.delete(key),
+  }
+    // ``prepareReplayMutation`` 生成幂等键，但它是**Node 模块**，用的是 Node 全局 crypto，
+    // 不是下面 vm 沙箱里那个 crypto。要让测试观察到生成的键，必须显式把 uuid 工厂注入进去；
+    // 只在沙箱里替换 crypto 会让 generatedKeys 永远是空的，断言随之恒假。
+    const uuidFactory = () => { const key = options.uuid ?? randomUUID(); generatedKeys.push(key); return key },
+      replayStateModule = { ...replayState, prepareReplayMutation: (previous, action, payload) => replayState.prepareReplayMutation(previous, action, payload, uuidFactory) }
+    const dependencies = {
     react: { useState(initial) { const i = cursor++; if (!(i in states)) states[i] = i in overrides ? overrides[i] : typeof initial === "function" ? initial() : initial; return [states[i], (next) => { states[i] = typeof next === "function" ? next(states[i]) : next }] }, useRef(value) { const i = cursor++; return states[i] ??= { current: value } }, useCallback: (callback) => callback, useEffect() {} },
     "next/link": { default: Link },
     "@/components/market/stock-kline-chart": { StockKlineChart: Chart },
@@ -28,16 +39,16 @@ function mount(role = "overview", api = {}, store = new Map()) {
     "@/stores/auth": { useAuthStore: Object.assign((selector) => selector({ loaded: true, user: auth }), { getState: () => ({ user: auth }) }) },
     "@/stores/display": { useDisplayStore: (selector) => selector({ candleUp: "red", candleDown: "green" }) },
     "@/lib/utils": { cn: (...items) => items.filter(Boolean).join(" ") },
-    "./stock-replay-state": replayState,
+    "./stock-replay-state": replayStateModule,
     "@/components/factor-research/stock-pending-writes-banner": { StockPendingWritesBanner: Banner },
     "@/lib/stock-pending-writes": loadPendingWrites(localStorage, { crypto }),
     "@/lib/stock-replay-api": Object.fromEntries(["createStockReplayAccount", "submitStockReplayOrder", "advanceStockReplayAccount", "cancelStockReplayOrder"].map((name) => [name, async (...args) => { calls.push({ name, args }); return api[name] ? api[name](...args) : { ...view, revision: 8 } }])),
   }
   const module = { exports: {} }, requireModule = createRequire(import.meta.url)
   const source = readFileSync(new URL("./stock-replay-workspace.tsx", import.meta.url), "utf8")
-  vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText + "\nmodule.exports.TestSession = ReplaySession;", { module, exports: module.exports, crypto: { randomUUID }, localStorage, require: (name) => dependencies[name] ?? requireModule(name) })
+  vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText + "\nmodule.exports.TestSession = ReplaySession;", { module, exports: module.exports, crypto: { randomUUID: () => { const key = options.uuid ?? randomUUID(); generatedKeys.push(key); return key } }, localStorage, require: (name) => dependencies[name] ?? requireModule(name) })
   const render = () => { cursor = 0; return module.exports.TestSession({ userId: "owner", tradingMode: "virtual", initialTab: role }) }
-  return { render, calls, Chart, History, Button, Input, Link, Banner, storage, pendingWrites: dependencies["@/lib/stock-pending-writes"], role(value) { role = value }, auth(value) { auth = value }, settle: () => new Promise(setImmediate) }
+  return { render, calls, Chart, History, Button, Input, Link, Banner, storage, storageControls, generatedKeys, pendingWrites: dependencies["@/lib/stock-pending-writes"], role(value) { role = value }, auth(value) { auth = value }, settle: () => new Promise(setImmediate) }
 }
 
 test("ledger pages render their own primary records without charts order form or date advance", () => {
@@ -207,4 +218,90 @@ test("the replay pages announce unconfirmed writes this page does not retry itse
     assert.equal(banner.props.ignore("dataset-job"), false)
     assert.equal(banner.props.ignore("report-bookmark"), false)
   }
+})
+
+const registryKey = "stock-pending-writes:owner:virtual"
+const pendingEntry = (key = randomUUID()) => ({ kind: "dataset-job", idempotency_key: key, signature: JSON.stringify({ existing: key }), created_at: "2026-10-26T06:10:00.000Z" })
+const retryButton = (page) => elements(page.render()).find((item) => item.type === page.Button && text(item) === "重试同一请求")
+
+function triggerReplayWrite(page, kind) {
+  if (kind === "cancel") return elements(page.render()).find((item) => item.type?.name === "ReplayOrders").props.onCancel("order-a")
+  if (kind === "step") return elements(page.render()).find((item) => item.type === page.Button && text(item).includes("下一交易日")).props.onClick()
+  if (kind === "order") return elements(page.render()).find((item) => item.type === "form" && item.props["aria-label"] !== "新建回放账户").props.onSubmit({ preventDefault() {} })
+  elements(page.render()).find((item) => item.type === page.Button && text(item).includes("新建账户")).props.onClick()
+  elements(page.render()).find((item) => item.props?.["aria-label"] === "回放起始交易日").props.onChange({ target: { value: "2026-10-16" } })
+  elements(page.render()).find((item) => item.type === "input" && item.props.type === "checkbox").props.onChange({ target: { checked: true } })
+  elements(page.render()).find((item) => item.type === "form" && item.props["aria-label"] === "新建回放账户").props.onSubmit({ preventDefault() {} })
+}
+
+test("eight initial pending entries cannot be evicted by replay cancellation; a freed slot retries the same retained command", async () => {
+  const entries = Array.from({ length: 8 }, () => pendingEntry()), original = JSON.stringify(entries)
+  const store = new Map([[registryKey, original]])
+  const page = mount("orders", {}, store)
+  triggerReplayWrite(page, "cancel"); await page.settle()
+  assert.equal(page.calls.length, 0, "registration rejection must prevent the write API")
+  assert.equal(store.get(registryKey), original, "all eight unresolved entries must remain byte-for-byte")
+  assert.ok(text(page.render()).includes(page.pendingWrites.pendingWriteFailureMessage("registry_full")))
+  assert.equal(page.generatedKeys.length, 1)
+  assert.equal(retryButton(page).props.disabled, false, "busy and in-flight guards must be released")
+  retryButton(page).props.onClick(); await page.settle()
+  assert.equal(page.calls.length, 0)
+  assert.equal(page.generatedKeys.length, 1)
+  page.pendingWrites.clearPendingWrite("owner:virtual", entries[0].idempotency_key) // Test simulates explicit resolution of one older write.
+  retryButton(page).props.onClick(); await page.settle()
+  assert.equal(page.calls.length, 1)
+  assert.equal(page.calls[0].args[2].idempotency_key, page.generatedKeys[0])
+  assert.equal(page.calls[0].args[2].expected_revision, 7)
+  assert.deepEqual(plain(page.pendingWrites.readPendingWrites("owner:virtual")), entries.slice(1))
+  assert.equal(elements(page.render()).find((item) => item.props?.["aria-label"] === "选择股票回放账户").props.disabled, false)
+})
+
+for (const kind of ["create", "order", "step", "cancel"]) test(`storage write failure blocks replay ${kind} and explicit recovery uses its original key`, async () => {
+  const original = JSON.stringify([pendingEntry()]), store = new Map([[registryKey, original]])
+  const page = mount(kind === "cancel" ? "orders" : "overview", {}, store, { storageControls: { writeFailure: true } })
+  triggerReplayWrite(page, kind); await page.settle()
+  assert.equal(page.calls.length, 0, `${kind} cannot execute without a verified registry receipt`)
+  assert.equal(store.get(registryKey), original)
+  assert.equal(page.generatedKeys.length, 1)
+  assert.equal(retryButton(page).props.disabled, false)
+  assert.ok(text(page.render()).includes(page.pendingWrites.pendingWriteFailureMessage("storage_write_failed")))
+  page.storageControls.writeFailure = false
+  assert.equal(page.calls.length, 0, "fixing storage must not automatically send a request")
+  retryButton(page).props.onClick(); await page.settle()
+  assert.equal(page.calls.length, 1)
+  const body = page.calls[0].args.at(-1)
+  assert.equal(body.idempotency_key, page.generatedKeys[0])
+  if (kind !== "create") assert.equal(body.expected_revision, 7)
+  assert.equal(page.generatedKeys.length, 1)
+  assert.equal(store.get(registryKey), original)
+  assert.equal(retryButton(page), undefined)
+})
+
+test("a storage read failure blocks a replay write without overwriting hidden old entries", async () => {
+  const original = JSON.stringify([pendingEntry()]), store = new Map([[registryKey, original]])
+  const page = mount("orders", {}, store, { storageControls: { readFailure: true } })
+  triggerReplayWrite(page, "cancel"); await page.settle()
+  assert.equal(page.calls.length, 0)
+  assert.equal(store.get(registryKey), original)
+  assert.equal(retryButton(page).props.disabled, false)
+  assert.ok(text(page.render()).includes(page.pendingWrites.pendingWriteFailureMessage("storage_read_failed")))
+  page.storageControls.readFailure = false
+  retryButton(page).props.onClick(); await page.settle()
+  assert.equal(page.calls[0].args[2].idempotency_key, page.generatedKeys[0])
+  assert.equal(page.generatedKeys.length, 1)
+})
+
+test("a same-key payload conflict preserves the prior write and holds replay command for explicit same-key retry", async () => {
+  const key = randomUUID(), old = pendingEntry(key), original = JSON.stringify([old]), store = new Map([[registryKey, original]])
+  const page = mount("orders", {}, store, { uuid: key })
+  triggerReplayWrite(page, "cancel"); await page.settle()
+  assert.equal(page.calls.length, 0)
+  assert.equal(store.get(registryKey), original)
+  assert.ok(text(page.render()).includes(page.pendingWrites.pendingWriteFailureMessage("key_conflict")))
+  assert.equal(retryButton(page).props.disabled, false)
+  page.pendingWrites.clearPendingWrite("owner:virtual", key) // Older conflicting action is explicitly resolved in the fixture.
+  retryButton(page).props.onClick(); await page.settle()
+  assert.equal(page.calls.length, 1)
+  assert.equal(page.calls[0].args[2].idempotency_key, key)
+  assert.equal(page.generatedKeys.length, 1)
 })

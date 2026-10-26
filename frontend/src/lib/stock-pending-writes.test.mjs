@@ -16,7 +16,7 @@ function mount(initial) {
   return { storage, ...loadPendingWrites(storage, { crypto }) }
 }
 
-function plain(value) { return JSON.parse(JSON.stringify(value)) }
+function plain(value) { return value === undefined ? undefined : JSON.parse(JSON.stringify(value)) }
 
 test("an untouched registry reads empty and writes nothing until a write is unconfirmed", () => {
   const page = mount()
@@ -31,13 +31,15 @@ test("recording an unconfirmed write round-trips every registry field", () => {
   assert.equal(page.pendingWriteStorageKey("owner:virtual"), "stock-pending-writes:owner:virtual")
 })
 
-test("re-recording the same idempotency key replaces the slot instead of duplicating the write", () => {
+test("same-key retries preserve the original intent and timestamp while conflicting payloads are rejected", () => {
   const page = mount()
-  page.recordPendingWrite("owner:virtual", entry())
-  page.recordPendingWrite("owner:virtual", entry({ signature: JSON.stringify(["order:account-a", { code: "000002" }]), created_at: "2026-10-26T03:00:00.000Z" }))
-  const rows = page.readPendingWrites("owner:virtual")
-  assert.equal(rows.length, 1)
-  assert.equal(rows[0].created_at, "2026-10-26T03:00:00.000Z")
+  assert.equal(page.recordPendingWrite("owner:virtual", entry())?.ok, true)
+  assert.equal(page.recordPendingWrite("owner:virtual", entry({ created_at: "2026-10-26T03:00:00.000Z" }))?.ok, true)
+  assert.deepEqual(plain(page.readPendingWrites("owner:virtual")), [entry()])
+  for (const conflict of [{ signature: JSON.stringify(["order:account-a", { code: "000002" }]) }, { kind: "replay-step" }, { expected_revision: 8 }]) {
+    assert.deepEqual(plain(page.recordPendingWrite("owner:virtual", entry(conflict))), { ok: false, reason: "key_conflict" })
+    assert.deepEqual(plain(page.readPendingWrites("owner:virtual")), [entry()])
+  }
 })
 
 test("clearing removes only the requested key and never touches another user or trading mode", () => {
@@ -84,18 +86,22 @@ test("no token or extra field is ever persisted, even when a caller passes one",
   assert.deepEqual(plain(page.readPendingWrites("owner:virtual")), [entry()])
 })
 
-test("a registry that cannot grow without bound drops the oldest unconfirmed writes", () => {
+test("a full registry rejects new pending writes without evicting any unresolved request and permits an exact retry", () => {
   const page = mount()
-  for (let index = 0; index < 14; index += 1) {
-    page.recordPendingWrite("owner:virtual", entry({ idempotency_key: `key-${index}`, created_at: `2026-10-26T00:${String(index).padStart(2, "0")}:00.000Z` }))
+  const original = []
+  for (let index = 0; index < 8; index += 1) {
+    const item = entry({ idempotency_key: `key-${index}` }); original.push(item)
+    assert.equal(page.recordPendingWrite("owner:virtual", item)?.ok, true)
   }
-  const rows = page.readPendingWrites("owner:virtual")
-  assert.equal(rows.length, 8)
-  assert.equal(rows.at(-1).idempotency_key, "key-13")
-  assert.equal(rows[0].idempotency_key, "key-6")
+  const before = page.storage.getItem(page.pendingWriteStorageKey("owner:virtual"))
+  assert.deepEqual(plain(page.recordPendingWrite("owner:virtual", entry({ idempotency_key: "key-8" }))), { ok: false, reason: "registry_full" })
+  assert.equal(page.storage.getItem(page.pendingWriteStorageKey("owner:virtual")), before)
+  assert.deepEqual(plain(page.readPendingWrites("owner:virtual")), original)
+  assert.equal(page.recordPendingWrite("owner:virtual", { ...original[0], created_at: "2026-10-26T03:00:00.000Z" }).ok, true)
+  assert.equal(page.storage.getItem(page.pendingWriteStorageKey("owner:virtual")), before)
 })
 
-test("unavailable or hostile storage never throws and never blocks the write itself", () => {
+test("unavailable or hostile storage never throws and returns an explicit refusal before financial submission", () => {
   const hostile = {
     getItem() { throw new Error("blocked") },
     setItem() { throw new Error("quota exceeded") },
@@ -103,11 +109,11 @@ test("unavailable or hostile storage never throws and never blocks the write its
   }
   const page = { ...loadPendingWrites(hostile) }
   assert.deepEqual(plain(page.readPendingWrites("owner:virtual")), [])
-  page.recordPendingWrite("owner:virtual", entry())
+  assert.deepEqual(plain(page.recordPendingWrite("owner:virtual", entry())), { ok: false, reason: "storage_read_failed" })
   page.clearPendingWrite("owner:virtual", entry().idempotency_key)
   const missing = loadPendingWrites(undefined)
   assert.deepEqual(plain(missing.readPendingWrites("owner:virtual")), [])
-  missing.recordPendingWrite("owner:virtual", entry())
+  assert.deepEqual(plain(missing.recordPendingWrite("owner:virtual", entry())), { ok: false, reason: "storage_unavailable" })
   missing.clearPendingWrite("owner:virtual", entry().idempotency_key)
 })
 
@@ -117,4 +123,61 @@ test("a client minted handle exists for writes that carry no server idempotency 
   const second = page.newPendingWriteKey()
   assert.match(first, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
   assert.notEqual(first, second)
+})
+
+test("serialized size refuses a new record without replacing the previously recoverable request", () => {
+  const page = mount()
+  const first = entry({ signature: "x".repeat(8100) })
+  assert.equal(page.recordPendingWrite("owner:virtual", first)?.ok, true)
+  const before = page.storage.getItem(page.pendingWriteStorageKey("owner:virtual"))
+  assert.deepEqual(plain(page.recordPendingWrite("owner:virtual", entry({ idempotency_key: "other-key", signature: "y".repeat(8100) }))), { ok: false, reason: "serialized_limit" })
+  assert.equal(page.storage.getItem(page.pendingWriteStorageKey("owner:virtual")), before)
+  assert.deepEqual(plain(page.readPendingWrites("owner:virtual")), [first])
+})
+
+test("corrupt or oversized existing registries are never silently overwritten or cleared", () => {
+  for (const raw of ["not-json", "x".repeat(20000), JSON.stringify([entry(), { kind: "broken" }]), JSON.stringify([entry(), entry()])]) {
+    const page = mount({ "stock-pending-writes:owner:virtual": raw })
+    assert.deepEqual(plain(page.recordPendingWrite("owner:virtual", entry({ idempotency_key: "new-key" }))), { ok: false, reason: "corrupt_registry" })
+    page.clearPendingWrite("owner:virtual", entry().idempotency_key)
+    assert.equal(page.storage.getItem("stock-pending-writes:owner:virtual"), raw)
+  }
+})
+
+test("the serialized resource boundary counts UTF-8 bytes and never erases an older oversized non-ASCII registry", () => {
+  const page = mount()
+  assert.equal(page.recordPendingWrite("owner:virtual", entry())?.ok, true)
+  const key = page.pendingWriteStorageKey("owner:virtual"), before = page.storage.getItem(key)
+  const oversized = entry({ idempotency_key: "chinese-key", signature: "中".repeat(6000) })
+  assert.deepEqual(plain(page.recordPendingWrite("owner:virtual", oversized)), { ok: false, reason: "serialized_limit" })
+  assert.equal(page.storage.getItem(key), before)
+  const oldRaw = JSON.stringify([oversized])
+  assert.ok(oldRaw.length < 16384 && Buffer.byteLength(oldRaw, "utf8") > 16384)
+  page.storage.setItem(key, oldRaw)
+  assert.deepEqual(plain(page.recordPendingWrite("owner:virtual", entry())), { ok: false, reason: "corrupt_registry" })
+  page.clearPendingWrite("owner:virtual", oversized.idempotency_key)
+  assert.equal(page.storage.getItem(key), oldRaw)
+  assert.deepEqual(plain(page.readPendingWrites("owner:virtual")), [])
+})
+
+test("failed or unverified persistence cannot produce a successful reservation receipt", () => {
+  const failing = memoryStorage()
+  failing.setItem = () => { throw new Error("private device details") }
+  const rejected = loadPendingWrites(failing)
+  assert.deepEqual(plain(rejected.recordPendingWrite("owner:virtual", entry())), { ok: false, reason: "storage_write_failed" })
+  const discarded = memoryStorage(); discarded.setItem = () => {}
+  assert.deepEqual(plain(loadPendingWrites(discarded).recordPendingWrite("owner:virtual", entry())), { ok: false, reason: "write_not_verified" })
+})
+
+test("invalid registration input is refused and failure messages never reveal an intent or internal storage error", () => {
+  const page = mount()
+  for (const item of [entry({ kind: "" }), entry({ expected_revision: 1.5 }), entry({ expected_revision: -1 }), entry({ signature: "x".repeat(8193) })]) {
+    assert.deepEqual(plain(page.recordPendingWrite("owner:virtual", item)), { ok: false, reason: "invalid_entry" })
+  }
+  assert.equal(page.storage.map.size, 0)
+  for (const reason of ["invalid_entry", "storage_unavailable", "storage_read_failed", "corrupt_registry", "registry_full", "serialized_limit", "storage_write_failed", "write_not_verified", "key_conflict"]) {
+    const message = page.pendingWriteFailureMessage(reason)
+    assert.equal(typeof message, "string"); assert.ok(message.length > 5)
+    assert.doesNotMatch(message, /private device|account-a|000001|accessToken|signature/)
+  }
 })

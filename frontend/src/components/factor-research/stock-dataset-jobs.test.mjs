@@ -218,9 +218,10 @@ test("another login scope or another write kind never surfaces as a retryable jo
 })
 
 test("a command too large to register gets no retry promise", async () => {
-  // 全市场提交会超出单字段 8192 上限，登记被静默丢弃；此时不得承诺可重试
+  // 全市场提交的签名会超出单字段 8192 上限，登记被拒（invalid_entry）；此时不得承诺可重试
   const command = { idempotency_key: id, parameters: { ...parameters, instruments: Array.from({ length: 900 }, (_, index) => `6${String(index).padStart(5, "0")}.SH`) } }
-  assert.ok(JSON.stringify(command).length > 8192)
+  const signature = JSON.stringify(command)
+  assert.ok(signature.length > 8192)
   const storage = memoryStorage()
   const view = mount({ accepting: true, command, storage, submitFails: true })
   await view.ready()
@@ -228,6 +229,29 @@ test("a command too large to register gets no retry promise", async () => {
   await view.ready()
   assert.equal(storage.getItem(pendingKey), null)
   assert.equal(nodes(view.render()).some((node) => node.type === "button" && text(node) === "用原幂等键重试"), false)
-  assert.match(text(view.render()), /无法登记|不能跨页|过大/)
+  assert.match(text(view.render()), /请求恢复信息无效|尚未发送/)
+  view.unmount()
+})
+
+test("a key already held by a different command is refused, never retried under that key", async () => {
+  // 注册表对同键不同内容返回 key_conflict 并**保留旧条目**。此时读回仍能查到该键，
+  // 只靠读回核实就会把这条新命令当成可重试的旧键——服务端按 (owner, mode, key) 去重，
+  // 会返回旧任务，而界面显示的是新参数。必须按回执判定，并明确拒绝。
+  const conflict = "3f0c5b8a-1d4e-4c27-9a63-7b1e5d2f8c04"
+  const storage = memoryStorage({
+    [pendingKey]: JSON.stringify([{ kind: "dataset-job", idempotency_key: conflict,
+      signature: JSON.stringify({ idempotency_key: conflict }), created_at: "2026-10-26T00:00:00.000Z" }]),
+  })
+  const view = mount({ accepting: true, command: { idempotency_key: conflict, parameters }, storage, submitFails: true })
+  await view.ready()
+  assert.equal(view.calls.filter((call) => call.kind === "submit").length, 0)
+  button(view.render(), "确认创建观察归档任务").props.onClick()
+  await view.ready()
+  // 登记被拒绝：不发出请求，也不把这条从未登记成功的新命令包装成可重试的旧键
+  assert.equal(view.calls.filter((call) => call.kind === "submit").length, 0)
+  assert.equal(nodes(view.render()).some((node) => node.type === "button" && text(node) === "用原幂等键重试"), false)
+  assert.match(text(view.render()), /不同内容|冲突|已占用/)
+  // 旧条目必须原样保留：不能为了腾位置或掩盖冲突而改写别人的未确认请求
+  assert.deepEqual(JSON.parse(storage.getItem(pendingKey)).map((entry) => entry.idempotency_key), [conflict])
   view.unmount()
 })
