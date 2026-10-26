@@ -140,10 +140,14 @@ OBSERVATION_REASONS = frozenset({"observation_only_dataset", "calendar_unverifie
 | A | 列式凭证按 `dataset_id` 推导 | **已完成** | §1.3。`receipt_for`，含三道拒绝，全部变异验证。 |
 | B | 研究输入IPC接缝 | **已完成** | §1.2。抓到并修掉 `__name__` 生产 bug。 |
 | C | 研究输入传输 | **已完成** | §1.1。 |
-| D | `research_ic`/`backtest`/`ml_train`/`report` 四内核 | **受阻** | A 做完后，缺的只剩 §2.2/§2.3 两份证据。二者都**没有存储来源**，且资格门禁刻意认定其未认证。要打通需要：要么登记真实日历/历史池证据（外部数据，需显式预算与授权），要么改资格口径（等于自己给自己开门，不做）。 |
+| D | `research_ic`/`backtest`/`ml_train`/`report` 四内核 | **误判，已更正** | 见表下说明 |
 | E | 重启五原端口 / tick 显式预算补采 / 020·021 落库 | **受阻** | 需用户授权，授权前 `financial_data_calls` 与 `paid_model_calls` 保持 0。 |
 
-**D 之前不伪造证据能推进的已经全部做完（A/B/C）。** 现在四个内核缺的是两份"全仓没有存储来源"的证据——那不是代码缺口，是数据/授权缺口。继续写代码不能闭合它，伪造它能闭合但会伪造资格门禁本该扣住的东西。
+**§2.2/§2.3 关于"不能认证"的分析成立，但据此判定 D 受阻是错的——已更正。**
+
+`2026-10-26-study-input-transport-and-ipc.md` §2.4 证明了资格阶梯无法在无外部证据时升级，这一半正确且本包不动它。但"不能认证"被当成了"不能运行"。系统自己把两者分开了：`run_archived_study(qa_only=True)` 今天就用真实 LightGBM 4.7.0 跑完整条链（`tests/test_stock_archived_study.py:18-24`），`task_dispatch.py:151` 的 `expected = "qa_only" if ... observation_only` 说明 021 任务链本来就允许从 observation_only 发布 qa_only 结果，而 `study_transport` 与 `receipt_for` 都是为此写成却零调用方。
+
+所以 D 不是数据/授权缺口，是**没接线**：`research_process.py:77-78` 把四个 kind 映射到 `run_unavailable`。更正后的工作包见 `docs/superpowers/plans/2026-10-26-research-kernels-qa-only-wiring.md`。接线不放宽任何资格：数据集仍 `observation_only`，`allows(qualification,"ml")` 仍为 False，发布结果仍被 `bound_experiment` 钉成 `qa_only`，日历/股票池由调用方传入并内容绑定进 `input_sha256`。
 
 ---
 
