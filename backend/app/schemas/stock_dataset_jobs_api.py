@@ -4,7 +4,7 @@ from uuid import UUID
 
 from pydantic import Field, model_validator
 
-from app.schemas.stock_research_v2 import Contract, DatasetRef
+from app.schemas.stock_research_v2 import SHA256, Contract, DatasetRef
 from app.schemas.stock_research_v2_jobs import JOB_KINDS, METHOD_VERSIONS, WORKFLOW_VERSIONS, TaskParameters
 
 
@@ -17,10 +17,50 @@ class CancelDatasetJob(Contract):
     pass
 
 
+class DatasetJobResult(DatasetRef):
+    """The 021 dataset branch, and the only result shape that restates a dataset.
+
+    ``ck_stock_v2_job_result`` pins this branch to ``observation_only``, and the two
+    research branches are required to leave all three dataset columns NULL.  So a
+    research job's result cannot restate a dataset qualification and therefore cannot
+    claim one: a run never upgrades the dataset it was built from.
+    """
+
+    @model_validator(mode="after")
+    def observation_only(self):
+        if self.qualification != "observation_only":
+            raise ValueError("观察任务不能宣称研究或可成交资格")
+        return self
+
+
+class ExperimentJobResult(Contract):
+    """The 021 experiment branch: a 019 experiment row, referenced and never re-certified.
+
+    It carries the identifier only.  The experiment's own report, grade and dataset
+    binding live on the 019 row and are read through the model API, so publishing a job
+    result can never restate — and so never raise — a validation grade.
+    """
+    experiment_id: UUID
+
+
+class ReportJobResult(Contract):
+    """The 021 report branch: the published artifact row and its content digest."""
+    artifact_id: UUID
+    report_sha256: str = Field(pattern=SHA256)
+
+
+# The three branches of ``ck_stock_v2_job_result`` are mutually exclusive and each is
+# distinguished by its own required fields, so exactly one of these is ever present.
+# ``Contract`` forbids extra fields, so a report payload cannot be read as a dataset
+# reference that is merely missing its dataset columns.
+TaskJobResult = DatasetJobResult | ExperimentJobResult | ReportJobResult
+
+
 class DatasetJobSummary(Contract):
     id: UUID
-    # Migration 021 widens the persisted kind/workflow/method allowlists; the
-    # single-dataset semantics of the *result* guard below are unchanged.
+    # Migration 021 widens the persisted kind/workflow/method allowlists and replaces
+    # the single-dataset result with the three branches above; the state machine below
+    # is what keeps a response from claiming a result its own status cannot carry.
     kind: Literal[*JOB_KINDS]
     status: Literal["pending", "running", "completed", "failed", "cancelled", "expired"]
     step: str = Field(max_length=64)
@@ -34,15 +74,13 @@ class DatasetJobSummary(Contract):
     queue_expires_at: datetime
     method_version: Literal[*METHOD_VERSIONS]
     workflow_version: Literal[*WORKFLOW_VERSIONS]
-    result: DatasetRef | None
+    result: TaskJobResult | None
     error_code: str | None = Field(max_length=100)
 
     @model_validator(mode="after")
     def validate_state(self):
         if (self.status == "completed") != (self.result is not None):
             raise ValueError("任务状态与结果不一致")
-        if self.result is not None and self.result.qualification != "observation_only":
-            raise ValueError("观察任务不能宣称研究或可成交资格")
         if (self.status in {"pending", "running"}) != (self.finished_at is None):
             raise ValueError("任务结束时间与状态不一致")
         timestamps = [self.created_at, self.updated_at, self.started_at, self.finished_at, self.deadline_at, self.queue_expires_at]

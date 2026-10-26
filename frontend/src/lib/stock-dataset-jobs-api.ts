@@ -24,9 +24,9 @@ export type CreateDatasetJob = z.input<typeof createDatasetJobSchema>
 // truth; these two literals must stay in step with it.  Each kind carries exactly one
 // workflow/method version pair, and the pair is what tells an observation job from a
 // research one — so the client checks the pairing rather than trusting either field
-// alone.  ``result.qualification`` stays ``observation_only`` for *every* kind: the
-// backend validator refuses a job claiming research or tradable qualification, because
-// a run never upgrades the dataset it was built from.
+// alone.  A job never claims a qualification its evidence cannot reach: the dataset
+// result branch is the only one that restates one and the backend pins it to
+// ``observation_only``, so a run can never upgrade the dataset it was built from.
 const OBSERVATION_METHOD = "stock-observation-manifest-v1"
 const RESEARCH_METHOD = "stock-research-task-v1"
 const OBSERVATION_WORKFLOW = "stock-v2-dataset-job-v1"
@@ -134,12 +134,23 @@ function parameterTag(parameters: unknown): string {
 }
 const taskParametersSchema = z.union([parametersSchema, ...Object.values(researchParameterSchemas)])
 
+/** The three mutually exclusive result branches ``ck_stock_v2_job_result`` allows.  Exactly
+ *  one is ever present and each is told apart by its own required fields, so a research
+ *  result is never re-read as a dataset reference that merely lacks its columns — every
+ *  member is ``strict()``, so the extra keys alone refuse it.  Only the dataset branch
+ *  restates a qualification, and the backend pins that one to ``observation_only``; the
+ *  two research branches carry none, so a research job cannot claim a grade at all. */
+const datasetResultSchema = z.object({ dataset_id: z.uuid(), data_version: digest, qualification: z.literal("observation_only") }).strict()
+const experimentResultSchema = z.object({ experiment_id: z.uuid() }).strict()
+const reportResultSchema = z.object({ artifact_id: z.uuid(), report_sha256: digest }).strict()
+const resultSchema = z.union([datasetResultSchema, experimentResultSchema, reportResultSchema])
+
 const fields = {
   id: z.uuid(), kind: kindSchema, status: z.enum(["pending", "running", "completed", "failed", "cancelled", "expired"]), step: z.string().max(64),
   attempts: z.number().int().min(0).max(1), request_id: z.string().regex(/^[a-f0-9]{32}$/),
   created_at: dateTime, updated_at: dateTime, started_at: dateTime.nullable(), finished_at: dateTime.nullable(), deadline_at: dateTime.nullable(), queue_expires_at: dateTime,
   method_version: methodSchema, workflow_version: workflowSchema,
-  result: z.object({ dataset_id: z.uuid(), data_version: digest, qualification: z.literal("observation_only") }).strict().nullable(), error_code: z.string().max(100).nullable(),
+  result: resultSchema.nullable(), error_code: z.string().max(100).nullable(),
 }
 function stateIsConsistent(value: z.infer<z.ZodObject<typeof fields>>) {
   return (value.status === "completed") === (value.result !== null)
@@ -166,6 +177,15 @@ export type DatasetJobDetail = z.infer<typeof detailSchema>
 export type ObservationJobParameters = Extract<DatasetJobDetail["parameters"], { source_ids: unknown }>
 export function isObservationDetail(detail: DatasetJobDetail): detail is DatasetJobDetail & { parameters: ObservationJobParameters } {
   return detail.kind === "dataset" && "source_ids" in detail.parameters
+}
+/** Which of the three 021 result branches a finished job published.  The branches are
+ *  told apart by the fields each declares, so this narrows on those — never on the
+ *  kind, which would render a dataset reference for a job that published a report. */
+export function isDatasetResult(result: NonNullable<DatasetJobDetail["result"]>): result is Extract<NonNullable<DatasetJobDetail["result"]>, { dataset_id: unknown }> {
+  return "dataset_id" in result
+}
+export function isReportResult(result: NonNullable<DatasetJobDetail["result"]>): result is Extract<NonNullable<DatasetJobDetail["result"]>, { report_sha256: unknown }> {
+  return "report_sha256" in result
 }
 const pageSchema = z.object({ items: z.array(summarySchema).max(100), total: z.number().int().nonnegative(), has_more: z.boolean() }).strict()
 export type DatasetJobPage = z.infer<typeof pageSchema>

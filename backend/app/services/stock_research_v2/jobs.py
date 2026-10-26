@@ -110,12 +110,50 @@ async def recover_expired(session):
     return count
 
 
+# The three mutually exclusive result branches ``ck_stock_v2_job_result`` allows.
+DATASET_RESULT_COLUMNS = ("result_dataset_id", "result_data_version", "result_qualification")
+EXPERIMENT_RESULT_COLUMNS = ("result_experiment_id",)
+REPORT_RESULT_COLUMNS = ("result_artifact_id", "result_report_sha256")
+RESULT_COLUMNS = DATASET_RESULT_COLUMNS + EXPERIMENT_RESULT_COLUMNS + REPORT_RESULT_COLUMNS
+
+
+def result_reference(job):
+    """The one result shape 021 permits for ``job``, read from its own columns.
+
+    021 replaced the single-dataset result with three mutually exclusive branches, so
+    the columns themselves say which shape a job published.  Reading them is stricter
+    than reading ``kind``: ``kind`` would happily render a dataset reference for a job
+    that published a report, and every research branch is required to leave the three
+    dataset columns NULL — which is also why a research result can never restate a
+    dataset qualification and so can never claim one.
+
+    A completed job whose columns match no branch, or a non-completed job that still
+    carries result columns, is a corrupt row.  It is refused by name rather than
+    reported as ``None``, which would surface somewhere else as a vague "状态与结果不一致".
+    """
+    if job.status != "completed":
+        if any(getattr(job, name) is not None for name in RESULT_COLUMNS):
+            raise JobError("job_result_corrupt", "未完成任务不可携带结果列", 409)
+        return None
+    if job.result_dataset_id is not None:
+        if any(getattr(job, name) is not None for name in EXPERIMENT_RESULT_COLUMNS + REPORT_RESULT_COLUMNS):
+            raise JobError("job_result_corrupt", "固定数据结果与研究结果不可同时存在", 409)
+        return DatasetRef(dataset_id=job.result_dataset_id, data_version=job.result_data_version,
+            qualification=job.result_qualification).model_dump(mode="json")
+    if job.result_experiment_id is not None:
+        if any(getattr(job, name) is not None for name in REPORT_RESULT_COLUMNS):
+            raise JobError("job_result_corrupt", "实验结果与报告结果不可同时存在", 409)
+        return {"experiment_id": str(job.result_experiment_id)}
+    if job.result_artifact_id is not None and job.result_report_sha256 is not None:
+        return {"artifact_id": str(job.result_artifact_id), "report_sha256": job.result_report_sha256}
+    raise JobError("job_result_corrupt", "任务已完成但结果列不构成021允许的任一形态", 409)
+
+
 def view(job, *, details=True):
-    reference = DatasetRef(dataset_id=job.result_dataset_id, data_version=job.result_data_version, qualification=job.result_qualification).model_dump(mode="json") if job.status == "completed" else None
     result = {"id": str(job.id), "kind": job.kind, "status": job.status, "step": job.step, "attempts": job.attempts, "request_id": job.request_id,
         "created_at": iso_datetime(job.created_at), "updated_at": iso_datetime(job.updated_at), "started_at": iso_datetime(job.started_at), "finished_at": iso_datetime(job.finished_at),
         "deadline_at": iso_datetime(job.deadline_at), "queue_expires_at": iso_datetime(job.queue_expires_at),
-        "method_version": job.method_version, "workflow_version": job.workflow_version, "result": reference, "error_code": job.error_code}
+        "method_version": job.method_version, "workflow_version": job.workflow_version, "result": result_reference(job), "error_code": job.error_code}
     if details:
         result["parameters"] = job.parameters["command"]
     return result

@@ -114,6 +114,31 @@ test("research jobs read through the shared list and detail instead of breaking 
   }
 })
 
+test("each of the three 021 result branches reads as itself, and none claims a grade", async () => {
+  const finished = { status: "completed", step: "completed", attempts: 1, started_at: item.created_at, finished_at: item.created_at }
+  const dataset = { dataset_id: id, data_version: "c".repeat(64), qualification: "observation_only" }
+  await withFetch(async () => Response.json({ ...detail, ...finished, result: dataset }), async () => {
+    const read = await api.getStockDatasetJob(id, "token")
+    assert.equal(read.result.data_version, "c".repeat(64))
+    assert.ok(api.isDatasetResult(read.result) && !api.isReportResult(read.result))
+  })
+  // The two research branches carry no dataset reference at all, so a research job's
+  // result cannot restate — and therefore cannot claim — a dataset qualification.
+  for (const [kind, result] of [["benchmark", { artifact_id: source, report_sha256: "d".repeat(64) }], ["ml_train", { experiment_id: source }]]) {
+    await withFetch(async () => Response.json({ ...researchJob(kind), ...finished, parameters: researchParameters[kind], result }), async () => {
+      const read = await api.getStockDatasetJob(id, "token")
+      assert.equal(read.kind, kind)
+      assert.ok(!api.isDatasetResult(read.result))
+      assert.equal(api.isReportResult(read.result), "report_sha256" in result)
+    })
+  }
+  // A report payload is never re-read as a dataset reference missing its columns, and a
+  // graded dataset result is still refused outright.
+  for (const result of [{ report_sha256: "d".repeat(64) }, { artifact_id: source }, { ...dataset, qualification: "research_only" }, { ...dataset, data_version: "short" }, { experiment_id: source, report_sha256: "d".repeat(64) }]) {
+    await withFetch(async () => Response.json({ ...detail, ...finished, result }), async () => { await assert.rejects(api.getStockDatasetJob(id, "token")) })
+  }
+})
+
 test("a job cannot claim another kind's versions, parameters or graded result", async () => {
   await withFetch(async () => Response.json({ ...item, method_version: RESEARCH_METHOD, workflow_version: RESEARCH_WORKFLOW }), async () => {
     await assert.rejects(api.getStockDatasetJob(id, "token"))

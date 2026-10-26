@@ -24,7 +24,7 @@ from pydantic import ValidationError
 from app.schemas.stock_research_v2_jobs import RESEARCH_MAX_RUNTIME, DatasetClaim
 from app.services.stock_research_jobs import JobError, utc_now
 from app.services.stock_research_v2.artifacts import ArtifactStore
-from app.services.stock_research_v2.task_dispatch import TaskOutcome, task_module, task_shape
+from app.services.stock_research_v2.task_dispatch import TASK_FAILURE_CODES, TaskOutcome, task_module, task_shape
 from app.services.stock_research_v2.windows_job_process import spawn_bounded_process
 from app.services.stock_research_worker import JobStopped, ProcessExecutionError, stop_process, supervise_process
 
@@ -66,6 +66,16 @@ async def supervise_research_process(process, *, heartbeat, timeout_seconds: flo
             raise JobError("execution_timeout", "研究任务超时，子进程已终止，不自动重试", 504) from None
         if error.code in {"worker_protocol", "result_too_large"}:
             raise JobError("task_kernel_failed", "研究执行器返回格式或大小无效", 422) from None
+        # The child reports a *named* refusal precisely so the job row can record why
+        # it stopped — ``task_inputs_unavailable`` (the calendar/universe/receipt a
+        # kernel needs and the claim does not carry) is the ordinary outcome for four
+        # of the five kinds.  Flattening it to ``worker_failed`` would throw away the
+        # only diagnosis the operator gets, so a code the claim may legally persist is
+        # carried through with the child's own status and message.  Anything else —
+        # an unrecognised code, or free-form text a kernel or a model produced — is
+        # still refused rather than persisted.
+        if error.code in TASK_FAILURE_CODES and isinstance(error.status, int) and 400 <= error.status <= 599:
+            raise JobError(error.code, error.message[:500], error.status) from None
         raise JobError("worker_failed", "研究执行器失败，未保存完成结果", 500) from None
     except ValidationError:
         raise JobError("task_kernel_failed", "研究结果未通过结构验证", 422) from None

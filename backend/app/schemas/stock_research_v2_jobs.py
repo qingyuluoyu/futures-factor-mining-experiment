@@ -42,7 +42,10 @@ class ResearchICParameters(Contract):
     factors: ResearchRequirements
     horizon: int = Field(default=20, strict=True, ge=1, le=250)
     groups: int = Field(default=5, strict=True, ge=2, le=20)
-    decay_lags: list[int] = Field(default=(1, 5, 10, 20), max_length=8)
+    # A list, not a tuple: pydantic does not validate defaults, so a tuple here would
+    # leave the field's runtime type depending on whether the caller sent it at all —
+    # the validator returns a list, so an omitted field would be the only tuple one.
+    decay_lags: list[int] = Field(default=[1, 5, 10, 20], max_length=8)
 
     @field_validator("decay_lags")
     @classmethod

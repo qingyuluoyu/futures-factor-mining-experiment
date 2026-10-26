@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useRef, useState } from "react"
-import { cancelStockDatasetJob, getStockDatasetJob, getStockDatasetJobAvailability, isObservationDetail, listStockDatasetJobs, submitStockDatasetJob, type CreateDatasetJob, type DatasetJobDetail, type DatasetJobPage } from "@/lib/stock-dataset-jobs-api"
+import { cancelStockDatasetJob, getStockDatasetJob, getStockDatasetJobAvailability, isDatasetResult, isObservationDetail, isReportResult, listStockDatasetJobs, submitStockDatasetJob, type CreateDatasetJob, type DatasetJobDetail, type DatasetJobPage } from "@/lib/stock-dataset-jobs-api"
 import { clearPendingWrite, pendingWriteFailureMessage, readPendingWrites, recordPendingWrite, type PendingWriteEntry } from "@/lib/stock-pending-writes"
 
 type Identity = { token: string; scope: string }
@@ -152,7 +152,11 @@ export function StockDatasetJobs({ token, scope, command }: { token: string; sco
         <p className="break-all">固定来源：{visible.detail.parameters.source_ids.join("、")}</p><p className="break-all">股票池版本：{visible.detail.parameters.pool_version}</p></>
         : <p>这是研究类型任务；本面板只展开观察归档的固定来源与股票池，不改写研究参数。</p>}
       {visible.detail.error_code && <p>结束代码：{visible.detail.error_code}</p>}
-      {visible.detail.result && <p className="break-all">观察数据集：{visible.detail.result.dataset_id}；版本：{visible.detail.result.data_version}；不可直接回测。</p>}
+      {visible.detail.result && (isDatasetResult(visible.detail.result)
+        ? <p className="break-all">观察数据集：{visible.detail.result.dataset_id}；版本：{visible.detail.result.data_version}；不可直接回测。</p>
+        : isReportResult(visible.detail.result)
+          ? <p className="break-all">研究结果：报告 {visible.detail.result.report_sha256}；产物 {visible.detail.result.artifact_id}。该报告不声明数据资格，也未认证公司行动或退市，不可直接当可成交结论。</p>
+          : <p className="break-all">研究结果：实验 {visible.detail.result.experiment_id}。模型历史与封存版本在模型库查看，本面板不重新认证。</p>)}
       <button type="button" className={buttonClass} disabled={visible.loading || !["pending", "running"].includes(visible.detail.status)} onClick={cancel}>取消所选任务</button></div>}
   </section>
 }
