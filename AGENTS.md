@@ -21,6 +21,19 @@
 
 ## 续做检查点
 
+最新执行24（2026-10-26）：④-3 结果链闭环，见`docs/superpowers/plans/2026-10-26-research-result-chain-closure.md`，commit `7bba3bf`。新增**全环测试**（真 lease、真 `JobService.submit`、真 `claim_next`、真有界子进程、真发布）后抓到三个此前全绿掩盖的真缺陷。只碰股票`backend/app/services/stock_research_v2/**`、两个`stock_*` schema、其测试与股票独占前端三文件，期货及共享认证/网关/布局/运行配置未动。
+
+1. **`view()` 渲染不出已完成的研究任务**（`jobs.py:114`）：021 把单结果改成三个互斥分支后仍无条件构造 `DatasetRef`，`finish_report` 把三个数据集列留 NULL，于是**任何已完成研究任务一 `get()` 就 `ValidationError`，`GET /jobs/{id}` 500**。这与 `e21a48e` 声称修掉的 `DatasetJobDetail.parameters` 是**同一响应对象的另一个字段**——那次只改 `parameters` 没改 `result`，所以"021 一放宽 kind 任何研究任务的详情都会 503"只对了一半。改为 `result_reference(job)` **从结果列本身**推导形态（比读 `kind` 更严，`kind` 会为发布 report 的任务渲染数据集引用）；两个研究分支按 CHECK 必须留空数据集列，故研究结果**无法重述数据集资格因此无法声称资格**；列组合不构成任一分支按名拒绝 `job_result_corrupt` 409，不返回 `None` 让别处报含糊的"状态与结果不一致"。
+2. **子进程具名拒绝码被父进程抹成 `worker_failed`**：`research_process.main()` 精心 `emit` 具名 code，`supervise_process` 也确实抛出，但 `supervise_research_process` 只认 `execution_timeout`/`worker_protocol`/`result_too_large`，其余一律压成 `worker_failed`。而 `task_inputs_unavailable` 是五个 kind 里**四个的常规结局**，不是边缘情况；`TASK_FAILURE_CODES` 就是为落库存在的，父侧却没用它。改为承接该集合内的码及其 status/message；**不放宽成任意文本通道**——未登记码、自由文本、大小写变体、非字符串仍一律 `worker_failed`（7 个负例钉住）。
+3. **API 响应 schema 根本没有研究结果的字段**：`result: DatasetRef | None` 加 `validate_state` 双重要求，021 三个结果列由 worker 写入却无任何客户端能读。三形态各自成模型（数据集分支继承 `DatasetRef` 保持线上字节不变），`Contract` 的 `extra="forbid"` 保证报告载荷不会被读成"缺列的数据集引用"；资格检查移入该分支自己的 validator，错误信息原样保留。前端 `stock-dataset-jobs-api.ts` 同源放宽，新增 `isDatasetResult`/`isReportResult` **按字段窄化**（不按 `kind`），面板对三种结果各说各的话，报告结果明确"不声明数据资格、未认证公司行动或退市"。
+4. **顺带修 `decay_lags`**：声明 `list[int]` 而默认值是 tuple，`validate_default=False` 下**同一字段的运行时类型取决于客户端发没发**，且每次 dump 喷一条序列化警告。
+
+**变异验证（每项回退后对应测试必须转红，否则绿不算数）**：①`view()` 改回无条件 `DatasetRef`→全环 benchmark 转红且报错与原缺陷逐字一致；②去掉 `TASK_FAILURE_CODES` 承接→单测转红**且全环 IC 测试也转红**，证明真实子进程测试对"响亮失败"路径同样有牙；③API `result` 收窄→schema 测试转红；④`decay_lags` 改回 tuple→新测试转红；⑤前端 union 收窄→客户端测试转红。
+
+**验证（真跑）**：后端全量**3286 passed, 4 skipped, 0 failed，退出0**（基线3277＋新增9：全环2、结果形态7），`decay_lags` 警告1364→1346；前端全量**895 passed 0 failed**，`tsc --noEmit` 退出0且`tsconfig.json`逐字节未变。全环测试用真实子进程：benchmark 真算出报告、真发布、真在 claim 自己的 scope 与 job 键下登记产物行；IC 内核真拒绝并落 `task_inputs_unavailable`，且不留下任何内容文件。后端须用`backend/.venv/Scripts/python.exe`；前端须`node --import ../logs/node-alias-register.mjs --test`。
+
+**未闭合**：`research_ic`/`backtest`/`ml_train`/`report` 四内核仍由 `run_unavailable` 以 `task_inputs_unavailable` 显式拒绝——本轮让这个**原因**正确落到任务行上，但缺的日历与历史股票池两份**无存储来源**的证据仍是数据/授权缺口，不是代码缺口；伪造等于伪造资格门禁本该扣住的东西，不做。①重启五原端口与③tick显式预算补采仍受阻，授权前`financial_data_calls`与`paid_model_calls`保持0；020/021未apply到任何真实库，未发布构建、未接PG、未跑HTTP契约、未做本人/五年/发布回退验收。**`git push` 连续两轮因无到 github.com:443 的网络路由失败（环境问题），`ef27ee0` 与 `7bba3bf` 均在本地完好但未推送。** 本轮未发起任何外部数据或模型调用，未重启任何服务。
+
 最新执行23（2026-10-26）：④-3后继包，见`docs/superpowers/plans/2026-10-26-study-input-transport-and-ipc.md`。三件事：研究输入传输、研究子进程IPC接缝测试、列式凭证按数据集推导。只碰股票`backend/app/services/stock_research_v2/**`及其测试，期货及共享认证/网关/布局/运行配置未动。
 
 1. **抓到并修掉一个生产bug**（在我自己上一轮`1d6af9c`里）：`research_process.execute_payload`用`task_module(claim.kind) != __name__`校验模块身份，而该程序以`python -m`启动时`__name__`是`"__main__"`——**每一个被派发的研究内核都会以`task_kind_unregistered`被拒绝**。此前全绿是因为所有既有测试要么进程内直调`run_task_kernel`（绕过该校验），要么用`fake_spawn`换掉`spawn_bounded_process`（从不真启子进程）。变异验证：把`MODULE_NAME`改回`__name__`，新IPC测试3条转红，而既有`test_stock_research_v2_task_dispatch.py`**依旧11 passed**——即该bug对所有既有测试不可见。已改为`MODULE_NAME = __spec__.name if __spec__ else __name__`。新增`tests/test_stock_research_process_ipc.py`用**真实解释器**跑`python -m ...research_process`，断言真正过管道的那一条消息（benchmark真算出报告、缺证据报具名码、四研究kind拒具名码、过期claim不跑内核、无模块kind拒绝、重复IPC字段不任选其一）。
