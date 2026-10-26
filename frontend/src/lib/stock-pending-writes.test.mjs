@@ -179,5 +179,8 @@ test("invalid registration input is refused and failure messages never reveal an
     const message = page.pendingWriteFailureMessage(reason)
     assert.equal(typeof message, "string"); assert.ok(message.length > 5)
     assert.doesNotMatch(message, /private device|account-a|000001|accessToken|signature/)
+    // Some callers attempt registration after an uncertain response. The registry cannot
+    // know whether a prior HTTP request was sent; only the pre-submit caller can say so.
+    assert.doesNotMatch(message, /尚未发送|未请求后端|没有发送/)
   }
 })

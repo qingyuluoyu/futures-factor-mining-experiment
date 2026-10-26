@@ -28,17 +28,18 @@ export type PendingWriteFailure = "invalid_entry" | "storage_unavailable" | "sto
   | "write_not_verified" | "key_conflict"
 export type PendingWriteReceipt = { ok: true } | { ok: false; reason: PendingWriteFailure }
 
+/** Describes persistence only; callers know whether their HTTP request has been sent. */
 export function pendingWriteFailureMessage(reason: PendingWriteFailure): string {
   const messages: Record<PendingWriteFailure, string> = {
-    invalid_entry: "请求恢复信息无效，本次尚未发送。请核对原请求。",
-    storage_unavailable: "浏览器恢复存储不可用，本次尚未发送。请允许本地存储后重试原请求。",
-    storage_read_failed: "无法读取未确认请求，本次尚未发送。恢复本地存储后可重试原请求。",
-    corrupt_registry: "已有请求恢复记录异常，本次尚未发送。请先核对原未确认请求，未自动删除记录。",
-    registry_full: "未确认请求已占满恢复空间，本次尚未发送。请先确认或解决已有请求后重试。",
-    serialized_limit: "请求恢复信息超过存储大小，本次尚未发送。已有未确认记录保留。",
-    storage_write_failed: "无法保存请求恢复信息，本次尚未发送。恢复存储后请重试原请求。",
-    write_not_verified: "请求恢复信息未能读回确认，本次尚未发送。请核对存储后重试原请求。",
-    key_conflict: "原请求标识对应不同内容，本次尚未发送。请核对原未确认请求，未覆盖其记录。",
+    invalid_entry: "请求恢复信息无效，无法登记。请核对原请求。",
+    storage_unavailable: "浏览器恢复存储不可用，无法登记。请允许本地存储后核对原请求。",
+    storage_read_failed: "无法读取未确认请求，无法登记。恢复本地存储后请核对原请求。",
+    corrupt_registry: "已有请求恢复记录异常，无法登记。请先核对原未确认请求，未自动删除记录。",
+    registry_full: "未确认请求已占满恢复空间，无法登记。请先确认或解决已有请求。",
+    serialized_limit: "请求恢复信息超过存储大小，无法登记。已有未确认记录保留。",
+    storage_write_failed: "无法保存请求恢复信息，无法登记。恢复存储后请核对原请求。",
+    write_not_verified: "请求恢复信息未能读回确认，未能登记。请核对存储和原请求。",
+    key_conflict: "原请求标识对应不同内容，无法登记。请核对原未确认请求，未覆盖其记录。",
   }
   return messages[reason]
 }

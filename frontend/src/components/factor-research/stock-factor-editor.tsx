@@ -124,7 +124,7 @@ export function StockFactorEditor({ token, scope }: { token: string; scope: stri
     const registration = recordPendingWrite(origin.scope, factorPendingEntry(command))
     if (!registration.ok) {
       patch(origin, { pendingRecorded: false })
-      throw new Error(pendingWriteFailureMessage(registration.reason))
+      throw new Error(`本次尝试尚未发送。${pendingWriteFailureMessage(registration.reason)}若此前已发送过同一请求，仍需按原键核对结果。`)
     }
     patch(origin, { pendingRecorded: true })
     let saved: CustomFactor

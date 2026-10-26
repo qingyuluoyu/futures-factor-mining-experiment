@@ -236,7 +236,7 @@ function ReplaySession({ userId, tradingMode, initialTab }: { userId: string; tr
       const registration = recordPendingWrite(pendingWriteScope, replayPendingEntry(command))
       if (!registration.ok) {
         if (isCurrentSession()) {
-          setError(pendingWriteFailureMessage(registration.reason))
+          setError(`本次尝试尚未发送。${pendingWriteFailureMessage(registration.reason)}若此前已发送过同一请求，仍需按原键核对结果。`)
           setRetry(command)
         }
         return
