@@ -21,6 +21,18 @@
 
 ## 续做检查点
 
+最新执行23（2026-10-26）：④-3后继包，见`docs/superpowers/plans/2026-10-26-study-input-transport-and-ipc.md`。三件事：研究输入传输、研究子进程IPC接缝测试、列式凭证按数据集推导。只碰股票`backend/app/services/stock_research_v2/**`及其测试，期货及共享认证/网关/布局/运行配置未动。
+
+1. **抓到并修掉一个生产bug**（在我自己上一轮`1d6af9c`里）：`research_process.execute_payload`用`task_module(claim.kind) != __name__`校验模块身份，而该程序以`python -m`启动时`__name__`是`"__main__"`——**每一个被派发的研究内核都会以`task_kind_unregistered`被拒绝**。此前全绿是因为所有既有测试要么进程内直调`run_task_kernel`（绕过该校验），要么用`fake_spawn`换掉`spawn_bounded_process`（从不真启子进程）。变异验证：把`MODULE_NAME`改回`__name__`，新IPC测试3条转红，而既有`test_stock_research_v2_task_dispatch.py`**依旧11 passed**——即该bug对所有既有测试不可见。已改为`MODULE_NAME = __spec__.name if __spec__ else __name__`。新增`tests/test_stock_research_process_ipc.py`用**真实解释器**跑`python -m ...research_process`，断言真正过管道的那一条消息（benchmark真算出报告、缺证据报具名码、四研究kind拒具名码、过期claim不跑内核、无模块kind拒绝、重复IPC字段不任选其一）。
+2. **研究输入传输**（新模块`study_transport.py`＋`artifacts.py`有界二进制路径）：`ArtifactStore`原是纯JSON且`allow_nan=False`，结构上装不下研究面板（大半是NaN，且需精确float64），故新增`put_binary`/`read_binary`（内容寻址、逐字节、`os.link`＋读回校验）。传输单向：父进程存盘、子进程只读字节；**坐标轴永远从引用重建不从载荷重建**，改存储字节无法给证券改名或移动日期。16条测试，五项修复逐一变异验证。
+3. **`ColumnarService.receipt_for`**（§2.1那个"数据在、索引在、缺查询"的缺口）：按`(owner_id,trading_mode,dataset_id)`查，走既有`ix_stock_columnar_dataset_scope`索引；`build`按*数据集任务*的幂等键建登记，而研究任务不携带该键，故研究claim无法向`build`要凭证。三道拒绝全部变异验证：无登记404、同一数据集多条登记但`manifest_sha256`不一致409（**不任选其一**）、全部已隔离409；去掉scope过滤会跨用户/盘泄露。
+
+**四个研究内核为何仍拒绝（带证据的阻塞，不是没做）**：`load_study_inputs`要三样——列式凭证、`TradingCalendar`、`HistoricalUniverse`。凭证本轮已可推导。但日历与股票池**全仓没有存储来源**：`TradingCalendar(`/`HistoricalUniverse(`只出现在tests，生产代码四处提及全是"重新校验调用方传入对象"；`migrations/*.sql`无A股日历/成员表，`app/models/`无`sessions`/`members`列；manifest只钉住股票池**身份**（pool_id/pool_version/instruments）没有**成员区间**，而`universe_at`消费的正是成员区间。且这是系统**自己**的设计：`qualification.py:44-46`的`OBSERVATION_REASONS`含`calendar_unverified`/`historical_universe_unverified`，`derive_qualification`见任一项即返回`observation_only`；`inspect_requirements`零生产调用方，无登记表、无证据行、无HTTP路由能让调用方断言已认证日历/股票池。`study_inputs.py:41`更明确拒绝猜测工作日。**伪造日历/股票池＝伪造资格门禁本该扣住的证据，本轮不做。**
+
+**验证（真跑）**：后端全量**3277 passed, 4 skipped, 0 failed，退出0**（基线3250＋本轮新增27：传输16、IPC接缝6、凭证查询5）。注意后端全量必须用`backend/.venv/Scripts/python.exe`；PATH上的系统`python`缺`asyncpg`/`passlib`，`pytest tests`会在收集阶段报102个错，看似代码回归实则环境问题（已记入memory）。
+
+**未闭合**：`research_ic`/`backtest`/`ml_train`/`report`四内核仍由`run_unavailable`以`task_inputs_unavailable`显式拒绝，缺的是日历与历史股票池两份**无存储来源**的证据——是数据/授权缺口，不是代码缺口，继续写代码不能闭合；`benchmark`内核已接通且经真实子进程验证。①重启五原端口与③tick显式预算补采仍受阻，授权前`financial_data_calls`与`paid_model_calls`保持0；020/021未apply到任何真实库，未发布构建、未接PG、未跑HTTP契约、未做本人/五年/发布回退验收。本轮未发起任何外部数据或模型调用，未重启任何服务，未据测试数宣称四内核可用或全系统完成。
+
 最新执行22（2026-10-26）：核对计划包`docs/superpowers/plans/2026-10-26-full-system-completion-plan.md`§0.2 后发现其状态表已严重过期——按表派活会重复造七包已完成的工作。已逐包核对源码并更正该表（见§0.2/§0.3）。实况：②-A(`43d1096`)、②-B(`c69f339`)、⑤(`bb1b1e8`)、④-1/④-2(`65a75c0`)、④-4(`e21a48e`)均已完成并提交；`main.py:1163-1164`两个router已include、`core/config.py:99`开关为Settings旋钮且默认OFF。只剩④-3在建、①③受阻。
 
 1. `e21a48e` ④-4六个能力的正式API路由：五个研究kind各一条POST（`/ic/jobs`→`CreateResearchICJob`等），每个只接受自己的command schema（`kind`是`Literal[...]`，跨kind body在pydantic层422，服务不被调用），全部复用观察开关`stock_v2_jobs_enabled`（唯一真正启动v2执行器的门），`cancel`故意不门禁。顺带修掉真问题：`DatasetJobDetail.parameters`原为`DatasetBuild`装不下研究参数，而`view()`返回`job.parameters["command"]`，021一放宽kind任何研究任务的`GET /jobs/{id}`都会503 `v2_job_response_failed`；改用claim同一`TaskParameters`判别联合。文档`docs/STOCK-TASK-ROUTES-21-2026-10-26.md`。后端3246通过0新增失败（4个失败全在④-3在建文件）。

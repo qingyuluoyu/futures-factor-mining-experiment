@@ -11,6 +11,11 @@ class ArtifactError(ValueError):
     pass
 
 
+# A study panel is the largest bounded payload the store carries: one field's
+# (date x instrument) float64 grid, so the ceiling is set per payload, not per store.
+MAX_BINARY_BYTES = 32 * 1024 * 1024
+
+
 @dataclass(frozen=True)
 class StoredArtifact:
     sha256: str
@@ -28,10 +33,10 @@ class ArtifactStore:
         self.root.mkdir(parents=True, exist_ok=True)
         self.max_bytes = max_bytes
 
-    def _path(self, digest: str):
+    def _path(self, digest: str, suffix: str = ".json"):
         if not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest):
             raise ArtifactError("产物指纹无效")
-        target = self.root / (digest + ".json")
+        target = self.root / (digest + suffix)
         if target.is_symlink() or target.resolve().parent != self.root:
             raise ArtifactError("产物路径越界或为链接")
         return target
@@ -81,3 +86,52 @@ class ArtifactStore:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
         return StoredArtifact(digest, len(data), target.name)
+
+    def read_binary(self, digest: str, *, limit: int = MAX_BINARY_BYTES):
+        """Read one content-addressed binary payload, byte-exact.
+
+        ``read_json`` canonicalises and forbids NaN, so it cannot carry a research
+        panel: a study grid is mostly NaN where a disclosure is missing, and a
+        float64 that round-trips through decimal text is no longer the value the
+        source recorded.  Here the digest *is* the whole contract — any payload whose
+        bytes hash to it is returned unchanged, and nothing is interpreted.
+        """
+        if type(limit) is not int or not 0 < limit <= MAX_BINARY_BYTES:
+            raise ArtifactError("二进制产物大小预算无效")
+        target = self._path(digest, ".bin")
+        try:
+            with target.open("rb") as source:
+                data = source.read(limit + 1)
+            if len(data) > limit or hashlib.sha256(data).hexdigest() != digest:
+                raise ArtifactError("二进制产物过大或指纹不一致")
+            return data
+        except ArtifactError:
+            raise
+        except (OSError, ValueError, OverflowError):
+            raise ArtifactError("二进制产物不存在或无法校验") from None
+
+    def put_binary(self, payload: bytes, *, limit: int = MAX_BINARY_BYTES) -> StoredArtifact:
+        """Store one bounded binary payload under its own content digest."""
+        if not isinstance(payload, (bytes, bytearray)) or type(limit) is not int or not 0 < limit <= MAX_BINARY_BYTES:
+            raise ArtifactError("二进制产物无效")
+        payload = bytes(payload)
+        if not 0 < len(payload) <= limit:
+            raise ArtifactError("二进制产物为空或超过大小预算")
+        digest = hashlib.sha256(payload).hexdigest()
+        target = self._path(digest, ".bin")
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=self.root, suffix=".tmp", delete=False) as output:
+                temporary = Path(output.name)
+                output.write(payload); output.flush(); os.fsync(output.fileno())
+            try:
+                os.link(temporary, target)
+            except FileExistsError:
+                pass
+            self.read_binary(digest, limit=limit)
+        except OSError:
+            raise ArtifactError("二进制产物写入失败，未返回可用引用") from None
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+        return StoredArtifact(digest, len(payload), target.name)

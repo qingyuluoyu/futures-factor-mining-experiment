@@ -28,6 +28,11 @@ from app.services.stock_research_v2.task_dispatch import TaskOutcome, task_modul
 
 MAX_INPUT_BYTES = 512 * 1024
 MAX_REPORT_BYTES = 64 * 1024 * 1024
+# This program's canonical module name.  It is started with ``python -m``, where
+# ``__name__`` is ``"__main__"``, so comparing a claim's registered module against
+# ``__name__`` would refuse every claim this program exists to run.  The spec carries
+# the real name under both ``-m`` and a plain import.
+MODULE_NAME = __spec__.name if __spec__ else __name__
 
 
 def unique_object(pairs):
@@ -102,7 +107,7 @@ async def execute_payload(raw: bytes, root: Path):
         raise JobError("artifact_store_unavailable", "研究产物存储根未就绪", 503)
     store = ArtifactStore(root, max_bytes=MAX_REPORT_BYTES)
     # The claim must name a module this program can actually run.
-    if task_module(claim.kind) != __name__:
+    if task_module(claim.kind) != MODULE_NAME:
         raise JobError("task_kind_unregistered", f"该任务类型不由此执行器运行：{claim.kind!r}", 422)
     return await asyncio.to_thread(run_task_kernel, claim, store)
 

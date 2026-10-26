@@ -114,6 +114,35 @@ class ColumnarService:
         logger.info("request_id=%s user_id=%s mode=%s operation=columnar_prepared_not_committed data_version=%s partitions=%s", request_id, self.scope.owner_id, self.scope.trading_mode, reference.data_version, len(partitions))
         return ColumnarRef(columnar_id=row.id, dataset=reference, manifest_sha256=digest)
 
+    async def receipt_for(self, reference):
+        """The columnar receipt already registered for a fixed dataset, or a refusal.
+
+        ``build`` is the only writer and it keys idempotency on the *dataset job's*
+        key, which a research job does not carry — so a research claim cannot ask
+        ``build`` for the receipt it needs.  This is the read side it does need: the
+        same ``(owner, mode, dataset)`` row, found through the index that exists for
+        exactly this purpose.  Nothing is built, rewritten or re-collected here.
+
+        More than one row can exist for one dataset, because idempotency is keyed on
+        the building job rather than on the dataset.  Two builds of the same dataset
+        are content-identical, so if they *disagree* the registry is faulty and this
+        refuses rather than quietly handing out the newer one.
+        """
+        reference = DatasetRef.model_validate(reference.model_dump())
+        await self.require_ready()
+        rows = (await self.session.execute(select(Row).where(*self.ownership(), Row.dataset_id == reference.dataset_id)
+            .order_by(Row.created_at.desc(), Row.id.desc()).execution_options(populate_existing=True))).scalars().all()
+        if not rows:
+            raise JobError("columnar_not_found", "该固定数据集尚未构建列式登记；未补采、未重建", 404)
+        if len({row.manifest_sha256 for row in rows}) != 1:
+            raise JobError("columnar_integrity_failed", "同一数据集存在内容不一致的列式登记，未任选其一", 409)
+        if not any(row.state == "ready" for row in rows):
+            raise JobError("columnar_integrity_failed", "该数据集的列式登记已隔离，未当可用数据使用", 409)
+        newest = next(row for row in rows if row.state == "ready")
+        logger.info("dataset_id=%s user_id=%s mode=%s operation=columnar_receipt_located data_version=%s registrations=%s",
+            reference.dataset_id, self.scope.owner_id, self.scope.trading_mode, reference.data_version, len(rows))
+        return ColumnarRef(columnar_id=newest.id, dataset=reference, manifest_sha256=newest.manifest_sha256)
+
     async def read(self, receipt, *, expected_idempotency_key=None):
         receipt = ColumnarRef.model_validate(receipt.model_dump())
         if expected_idempotency_key is not None and not isinstance(expected_idempotency_key, UUID):
