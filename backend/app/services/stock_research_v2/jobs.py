@@ -9,11 +9,15 @@ from pydantic import ValidationError
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import defer
 
+from app.models.stock_research_dataset import StockResearchArtifact, StockResearchDataset
 from app.models.stock_research_v2_job import StockResearchV2Job as Job, StockResearchV2Worker as Worker, V2JobBase, V2JobSchemaVersion
 from app.schemas.stock_research_v2 import DatasetBuild, DatasetRef, Scope
-from app.schemas.stock_research_v2_jobs import ACTIVE, TERMINAL, METHOD_VERSION, WORKFLOW_VERSION, CreateDatasetJob, DatasetClaim, WorkerLease
+from app.schemas.stock_research_v2_jobs import (ACTIVE, TERMINAL, JOB_KINDS, METHOD_VERSION, METHOD_VERSIONS, RESEARCH_METHOD_VERSION,
+    RESEARCH_WORKFLOW_VERSION, WORKFLOW_VERSION, WORKFLOW_VERSIONS, CreateBacktestJob, CreateBenchmarkJob, CreateDatasetJob, CreateMLTrainJob,
+    CreateReportJob, CreateResearchICJob, DatasetClaim, WorkerLease)
 from app.services.stock_research_jobs import JobError, iso_datetime, utc_datetime, utc_now
 from app.services.stock_research_v2.archive import ArchiveService, datasets_ready, descriptor
+from app.services.stock_research_v2.task_dispatch import OBSERVATION_FAILURE_CODES, TASK_FAILURE_CODES, bound_artifact, bound_experiment, require_chain
 
 SCHEMA_VERSION = "20261023_016_stock_research_v2_jobs"
 SCHEMA_PATH = Path(__file__).resolve().parents[3] / "migrations" / f"{SCHEMA_VERSION}.sql"
@@ -21,6 +25,23 @@ LEASE_SECONDS = 15
 MAX_ACTIVE = 16
 MAX_SCOPE_ACTIVE = 2
 logger = logging.getLogger("qihuo.stock_research_v2_jobs")
+
+# One command schema per persisted kind.  A kind outside this table has no submit
+# path and no claim path, so an unregistered kind can never enter the queue.
+CREATE_COMMANDS = {"dataset": CreateDatasetJob, "research_ic": CreateResearchICJob, "backtest": CreateBacktestJob,
+    "benchmark": CreateBenchmarkJob, "ml_train": CreateMLTrainJob, "report": CreateReportJob}
+assert tuple(CREATE_COMMANDS) == JOB_KINDS
+# The observation contract keeps its original method/workflow pair; the research
+# kernels carry their own, so a digest can never be replayed across the two chains.
+METHOD_BY_KIND = {kind: (METHOD_VERSION if kind == "dataset" else RESEARCH_METHOD_VERSION) for kind in JOB_KINDS}
+WORKFLOW_BY_KIND = {kind: (WORKFLOW_VERSION if kind == "dataset" else RESEARCH_WORKFLOW_VERSION) for kind in JOB_KINDS}
+FAILURE_CODES = frozenset(OBSERVATION_FAILURE_CODES) | frozenset(TASK_FAILURE_CODES)
+
+
+def command_model(kind):
+    if not isinstance(kind, str) or kind not in CREATE_COMMANDS:
+        raise JobError("task_kind_unregistered", f"未登记的研究任务类型：{kind!r}", 422)
+    return CREATE_COMMANDS[kind]
 
 
 async def jobs_ready(session):
@@ -68,7 +89,10 @@ def terminal(job, status, now, code=None):
     job.status = job.step = status
     job.updated_at = job.finished_at = now
     job.error_code = code
+    # Every one of the three 021 result shapes is cleared: a non-completed job must
+    # satisfy the fourth branch of ck_stock_v2_job_result, which allows no columns.
     job.result_dataset_id = job.result_data_version = job.result_qualification = None
+    job.result_experiment_id = job.result_report_sha256 = job.result_artifact_id = None
 
 
 async def recover_expired(session):
@@ -105,6 +129,32 @@ async def sources_snapshot(archive, command):
     return [{"source_id": str(source.id), "sha256": artifact.sha256, "byte_size": artifact.byte_size, "row_count": source.row_count, "kind": source.kind} for source, artifact in sources]
 
 
+async def dataset_snapshot(session, scope, reference):
+    """The fixed dataset a research claim depends on, re-read at submit and at claim.
+
+    This is the row-level binding check and it is deliberately independent of any
+    artifact store: it proves the dataset exists, belongs to the current user/盘, is
+    still ready, and matches the declared version and qualification.  The manifest's
+    content integrity was verified when the observation dataset was built and again
+    whenever a dataset job publishes, so a research job never has to re-read a
+    manifest to prove which dataset it is bound to.
+    """
+    reference = DatasetRef.model_validate(reference)
+    if not await datasets_ready(session):
+        raise JobError("dataset_schema_unavailable", "股票数据版本登记尚未迁移或校验和不匹配", 503)
+    row = (await session.execute(select(StockResearchDataset, StockResearchArtifact).join(StockResearchArtifact,
+        StockResearchArtifact.id == StockResearchDataset.manifest_artifact_id).where(StockResearchDataset.id == reference.dataset_id,
+        StockResearchArtifact.owner_id == scope.owner_id, StockResearchArtifact.trading_mode == scope.trading_mode))).first()
+    if row is None:
+        raise JobError("dataset_not_found", "固定数据集不存在或不属于当前用户/盘", 404)
+    dataset, artifact = row
+    if artifact.state != "ready" or artifact.purpose != "dataset":
+        raise JobError("source_quarantined", "所选数据集未就绪或已隔离", 409)
+    if dataset.data_version != reference.data_version or dataset.qualification != reference.qualification:
+        raise JobError("dataset_version_conflict", "数据集版本或资格与固定引用不一致", 409)
+    return {"dataset_id": str(dataset.id), "data_version": dataset.data_version, "qualification": dataset.qualification}
+
+
 class JobService:
     def __init__(self, session, scope: Scope):
         self.session, self.scope = session, Scope.model_validate(scope.model_dump())
@@ -136,11 +186,13 @@ class JobService:
         rows = (await self.session.execute(self.owned().options(defer(Job.parameters, raiseload=True)).order_by(Job.created_at.desc(), Job.id.desc()).limit(limit).offset(offset).execution_options(populate_existing=True))).scalars().all()
         return {"items": [view(job, details=False) for job in rows], "total": total, "has_more": offset + len(rows) < total}
 
-    async def submit(self, command: CreateDatasetJob, *, request_id):
-        command = CreateDatasetJob.model_validate(command.model_dump())
+    async def submit(self, command, *, request_id):
+        model = command_model(command.kind)
+        command = model.model_validate(command.model_dump())
         if not isinstance(request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", request_id):
             raise JobError("invalid_request_id", "请求号无效", 422)
-        digest, _ = descriptor({**command.model_dump(mode="json", exclude={"idempotency_key"}), "method_version": METHOD_VERSION, "workflow_version": WORKFLOW_VERSION}, 512 * 1024)
+        method, workflow = METHOD_BY_KIND[command.kind], WORKFLOW_BY_KIND[command.kind]
+        digest, _ = descriptor({**command.model_dump(mode="json", exclude={"idempotency_key"}), "method_version": method, "workflow_version": workflow}, 512 * 1024)
         await guard(self.session)
         existing = await self.session.scalar(self.owned().where(Job.idempotency_key == command.idempotency_key).execution_options(populate_existing=True))
         if existing is not None:
@@ -149,7 +201,14 @@ class JobService:
             return view(existing)
         if not await self.available():
             raise JobError("worker_unavailable", "无有效v2观察数据执行器租约；没有新建任务", 503)
-        snapshot = await sources_snapshot(ArchiveService(self.session, self.scope), command.parameters)
+        archive = ArchiveService(self.session, self.scope)
+        if command.kind == "dataset":
+            snapshot = await sources_snapshot(archive, command.parameters)
+            parameters = {"command": command.parameters.model_dump(mode="json"), "sources": snapshot}
+        else:
+            # A research job depends on one fixed dataset instead of raw sources.
+            snapshot = await dataset_snapshot(self.session, self.scope, command.parameters.dataset)
+            parameters = {"command": command.parameters.model_dump(mode="json"), "dataset": snapshot}
         await recover_expired(self.session)
         active = select(func.count()).select_from(Job).where(Job.status.in_(ACTIVE))
         if await self.session.scalar(active.where(Job.owner_id == self.scope.owner_id, Job.trading_mode == self.scope.trading_mode)) >= MAX_SCOPE_ACTIVE:
@@ -158,11 +217,11 @@ class JobService:
             raise JobError("queue_full", "研究队列暂满", 429)
         now = utc_now()
         job = Job(id=uuid4(), owner_id=self.scope.owner_id, trading_mode=self.scope.trading_mode, idempotency_key=command.idempotency_key, request_hash=digest, request_id=request_id, kind=command.kind,
-            status="pending", step="queued", parameters={"command": command.parameters.model_dump(mode="json"), "sources": snapshot}, method_version=METHOD_VERSION, workflow_version=WORKFLOW_VERSION,
+            status="pending", step="queued", parameters=parameters, method_version=method, workflow_version=workflow,
             max_runtime_seconds=command.max_runtime_seconds, max_queue_seconds=command.max_queue_seconds, attempts=0, created_at=now, updated_at=now, queue_expires_at=now + timedelta(seconds=command.max_queue_seconds))
         self.session.add(job)
         await self.session.flush()
-        logger.info("request_id=%s job_id=%s user_id=%s mode=%s step=prepared_not_committed workflow=%s", request_id, job.id, self.scope.owner_id, self.scope.trading_mode, WORKFLOW_VERSION)
+        logger.info("request_id=%s job_id=%s user_id=%s mode=%s step=prepared_not_committed workflow=%s kind=%s", request_id, job.id, self.scope.owner_id, self.scope.trading_mode, workflow, command.kind)
         return view(job)
 
     async def cancel(self, identifier):
@@ -209,19 +268,31 @@ async def claim_next(session, lease: WorkerLease):
         raise JobError("worker_lease_lost", "执行器租约失效，禁止领取任务", 409)
     if worker.busy_job_id is not None:
         return None
-    job = await session.scalar(select(Job).where(Job.status == "pending", Job.kind == "dataset", Job.workflow_version == WORKFLOW_VERSION).order_by(Job.created_at, Job.id).limit(1).with_for_update(skip_locked=True).execution_options(populate_existing=True))
+    # Dispatch is by the persisted kind, oldest first across both chains.
+    job = await session.scalar(select(Job).where(Job.status == "pending", Job.kind.in_(JOB_KINDS),
+        Job.workflow_version.in_(WORKFLOW_VERSIONS)).order_by(Job.created_at, Job.id).limit(1).with_for_update(skip_locked=True).execution_options(populate_existing=True))
     if job is None:
         return None
     scope = Scope(owner_id=job.owner_id, trading_mode=job.trading_mode)
     try:
-        submitted = CreateDatasetJob(idempotency_key=job.idempotency_key, parameters=job.parameters["command"], max_runtime_seconds=job.max_runtime_seconds, max_queue_seconds=job.max_queue_seconds)
+        # A research kind is only handed out against a schema that can store its
+        # result: 021 unapplied fails this job instead of silently skipping it.
+        if job.kind != "dataset":
+            await require_chain(session)
+        model = command_model(job.kind)
+        submitted = model(idempotency_key=job.idempotency_key, parameters=job.parameters["command"], max_runtime_seconds=job.max_runtime_seconds, max_queue_seconds=job.max_queue_seconds)
         command = submitted.parameters
         digest, _ = descriptor({**submitted.model_dump(mode="json", exclude={"idempotency_key"}), "method_version": job.method_version, "workflow_version": job.workflow_version}, 512 * 1024)
-        if digest != job.request_hash or job.method_version != METHOD_VERSION:
+        if digest != job.request_hash or job.method_version != METHOD_BY_KIND[job.kind] or job.workflow_version != WORKFLOW_BY_KIND[job.kind]:
             raise JobError("job_input_integrity_failed", "任务参数或方法指纹变化", 409)
-        snapshot = await sources_snapshot(ArchiveService(session, scope), command)
-        if snapshot != job.parameters["sources"]:
-            raise JobError("source_version_conflict", "固定来源登记变化", 409)
+        if job.kind == "dataset":
+            snapshot = await sources_snapshot(ArchiveService(session, scope), command)
+            if snapshot != job.parameters["sources"]:
+                raise JobError("source_version_conflict", "固定来源登记变化", 409)
+        else:
+            snapshot = await dataset_snapshot(session, scope, command.dataset)
+            if snapshot != job.parameters["dataset"]:
+                raise JobError("source_version_conflict", "固定数据集登记变化", 409)
     except JobError as error:
         terminal(job, "failed", now, error.code)
         await session.flush()
@@ -237,7 +308,9 @@ async def claim_next(session, lease: WorkerLease):
     job.worker_token = uuid4()
     worker.busy_job_id = job.id
     await session.flush()
-    return DatasetClaim(job_id=job.id, scope=scope, worker=lease, token=job.worker_token, parameters=command, request_id=job.request_id, deadline_at=job.deadline_at)
+    # The claim carries the persisted kind so no downstream step has to guess it.
+    return DatasetClaim(job_id=job.id, kind=job.kind, scope=scope, worker=lease, token=job.worker_token,
+        parameters=command, request_id=job.request_id, deadline_at=job.deadline_at)
 
 
 async def fenced(session, claim):
@@ -276,7 +349,9 @@ async def heartbeat_worker(session, lease: WorkerLease):
 
 
 async def fail_claim(session, claim: DatasetClaim, code):
-    if code not in {"worker_failed", "dataset_invalid", "execution_timeout"}:
+    # Only registered codes are persistable: arbitrary exception or model text can
+    # never become a job's error_code.
+    if code not in FAILURE_CODES:
         raise JobError("invalid_failure_code", "不可持久化任意异常或模型文本", 422)
     await guard(session)
     job = await fenced(session, claim)
@@ -284,6 +359,63 @@ async def fail_claim(session, claim: DatasetClaim, code):
         return False
     terminal(job, "failed", utc_now(), code)
     await session.flush()
+    return True
+
+
+def _shape_gate(claim, expected):
+    """A claim may only publish the single result shape its own kind declares."""
+    from app.services.stock_research_v2.task_dispatch import task_shape
+    try:
+        shape = task_shape(claim.kind)
+    except JobError:
+        raise JobError("invalid_result_shape", "观察任务只能发布固定数据结果", 409) from None
+    if shape != expected:
+        raise JobError("invalid_result_shape", f"该任务类型不能发布{expected}结果", 409)
+
+
+async def finish_experiment(session, claim: DatasetClaim, experiment_id, report_sha256):
+    """Publish the 021 experiment shape: exactly one result column set.
+
+    The experiment row already exists in 019 and is only referenced here, never
+    registered or re-certified, so a kernel cannot mint an experiment by publishing.
+    """
+    await guard(session)
+    job = await fenced(session, claim)
+    if job is None:
+        return False
+    _shape_gate(claim, "experiment")
+    experiment = await bound_experiment(session, claim, experiment_id, report_sha256)
+    job = await fenced(session, claim)
+    if job is None:
+        return False
+    terminal(job, "completed", utc_now())
+    job.result_experiment_id = experiment.id
+    await session.flush()
+    logger.info("request_id=%s job_id=%s user_id=%s mode=%s step=result_prepared_not_committed shape=experiment model_calls=0",
+        claim.request_id, claim.job_id, claim.scope.owner_id, claim.scope.trading_mode)
+    return True
+
+
+async def finish_report(session, claim: DatasetClaim, artifact_id, report_sha256):
+    """Publish the 021 report shape: exactly one result column set.
+
+    The artifact row is a 015 row owned by the claim's own scope whose content digest
+    equals the reported one; nothing is written to it here beyond the reference.
+    """
+    await guard(session)
+    job = await fenced(session, claim)
+    if job is None:
+        return False
+    _shape_gate(claim, "report")
+    artifact = await bound_artifact(session, claim, artifact_id, report_sha256)
+    job = await fenced(session, claim)
+    if job is None:
+        return False
+    terminal(job, "completed", utc_now())
+    job.result_artifact_id, job.result_report_sha256 = artifact.id, artifact.sha256
+    await session.flush()
+    logger.info("request_id=%s job_id=%s user_id=%s mode=%s step=result_prepared_not_committed shape=report model_calls=0",
+        claim.request_id, claim.job_id, claim.scope.owner_id, claim.scope.trading_mode)
     return True
 
 
